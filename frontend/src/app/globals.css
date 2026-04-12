@@ -1,0 +1,36 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-background: #0a0a0f;
+  --color-foreground: #e5e7eb;
+  --color-card: #111827;
+  --color-card-hover: #1f2937;
+  --color-border: #1f2937;
+  --color-accent: #3b82f6;
+  --color-green: #10b981;
+  --color-red: #ef4444;
+  --color-yellow: #f59e0b;
+  --color-muted: #6b7280;
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--color-background);
+  color: var(--color-foreground);
+  font-family: var(--font-sans), system-ui, sans-serif;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--color-background); }
+::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 3px; }
+
+/* Pulse animation for live indicator */
+@keyframes pulse-green {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.animate-pulse-green {
+  animation: pulse-green 2s ease-in-out infinite;
+}
