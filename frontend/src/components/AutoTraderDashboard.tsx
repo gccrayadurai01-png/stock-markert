@@ -20,6 +20,7 @@ export default function AutoTraderDashboard({ initialData }: Props) {
   const [tab, setTab] = useState<"positions" | "watchlist" | "journal" | "settings">("positions");
   const [loading, setLoading] = useState(false);
   const [toggling, setToggling] = useState(false);
+  const [scanning, setScanning] = useState(false);
 
   // Poll auto trader status every 10 seconds
   useEffect(() => {
@@ -58,6 +59,16 @@ export default function AutoTraderDashboard({ initialData }: Props) {
     setToggling(false);
   }
 
+  async function forceScan() {
+    setScanning(true);
+    try {
+      await fetch(`${API}/api/auto-trader/scan-now`, { method: "POST" });
+      await fetchStatus();
+      if (tab === "journal") fetchJournal();
+    } catch { /* ignore */ }
+    setScanning(false);
+  }
+
   useEffect(() => {
     if (tab === "journal") fetchJournal();
   }, [tab]);
@@ -87,18 +98,55 @@ export default function AutoTraderDashboard({ initialData }: Props) {
           )}
         </div>
 
-        <button
-          onClick={toggleAutoTrader}
-          disabled={toggling}
-          className={`px-6 py-3 rounded-xl font-black text-sm transition-all ${
-            enabled
-              ? "bg-green text-white shadow-lg shadow-green/30 animate-pulse"
-              : "bg-card border-2 border-border text-muted hover:border-green hover:text-green"
-          }`}
-        >
-          {toggling ? "..." : enabled ? "AUTO: ON" : "AUTO: OFF"}
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={forceScan}
+            disabled={scanning}
+            className="px-4 py-3 rounded-xl font-black text-sm bg-accent hover:bg-accent/80 text-white transition-all shadow-lg shadow-accent/20"
+          >
+            {scanning ? "⏳ SCANNING..." : "🔍 SCAN NOW"}
+          </button>
+          <button
+            onClick={toggleAutoTrader}
+            disabled={toggling}
+            className={`px-6 py-3 rounded-xl font-black text-sm transition-all ${
+              enabled
+                ? "bg-green text-white shadow-lg shadow-green/30 animate-pulse"
+                : "bg-card border-2 border-border text-muted hover:border-green hover:text-green"
+            }`}
+          >
+            {toggling ? "..." : enabled ? "AUTO: ON" : "AUTO: OFF"}
+          </button>
+        </div>
       </div>
+
+      {/* Intelligence Status Bar */}
+      {data?.intelligence && (
+        <div className="bg-gradient-to-r from-accent/10 via-purple-500/10 to-green/10 rounded-xl border border-accent/30 px-4 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <span className="text-xs font-black text-accent uppercase">🧠 Intelligence</span>
+            <span className="text-[10px] px-2 py-0.5 rounded-full bg-green/20 text-green font-bold">
+              {data.intelligence.indicators_active} Indicators
+            </span>
+            <span className="text-[10px] px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-400 font-bold">
+              {data.intelligence.investor_perspectives} Investor Minds
+            </span>
+            <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
+              data.intelligence.ai_enabled ? "bg-yellow/20 text-yellow" : "bg-muted/20 text-muted"
+            }`}>
+              {data.intelligence.ai_enabled ? "🤖 AI Active" : "🤖 AI Off"}
+            </span>
+          </div>
+          <div className="flex items-center gap-3">
+            <span className={`text-[10px] font-bold ${
+              data.intelligence.market_sentiment === "BULLISH" ? "text-green" :
+              data.intelligence.market_sentiment === "BEARISH" ? "text-red" : "text-muted"
+            }`}>
+              📰 {data.intelligence.market_sentiment} ({data.intelligence.news_articles} articles)
+            </span>
+          </div>
+        </div>
+      )}
 
       {/* Status Cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
@@ -355,7 +403,7 @@ function WatchlistTab({ signals }: { signals: AutoTraderPendingSignal[] }) {
               </div>
               <div className="text-right">
                 <span className={`text-lg font-black ${s.confluence_score >= 70 ? "text-yellow" : "text-muted"}`}>
-                  {s.confluence_score}/100
+                  {s.confluence_score}/110
                 </span>
                 <div className="text-[9px] text-muted">Need 75 to enter</div>
               </div>
@@ -505,7 +553,7 @@ function SettingsTab({ onSave }: { onSave: () => void }) {
           onChange={(v) => setConfig({ ...config, scan_interval_seconds: Number(v) })} />
       </div>
 
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-3 flex-wrap">
         <label className="flex items-center gap-2 text-xs text-foreground">
           <input
             type="checkbox"
@@ -514,6 +562,15 @@ function SettingsTab({ onSave }: { onSave: () => void }) {
             className="rounded"
           />
           Test Mode (paper trading only)
+        </label>
+        <label className="flex items-center gap-2 text-xs text-foreground">
+          <input
+            type="checkbox"
+            checked={config.use_ai_confirmation !== false}
+            onChange={(e) => setConfig({ ...config, use_ai_confirmation: e.target.checked })}
+            className="rounded"
+          />
+          🧠 AI Confirmation (Claude reviews 85+ trades)
         </label>
       </div>
 

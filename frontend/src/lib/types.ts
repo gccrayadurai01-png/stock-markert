@@ -268,6 +268,15 @@ export interface AutoTraderStats {
   max_drawdown: number;
 }
 
+export interface AutoTraderIntelligence {
+  news_articles: number;
+  market_sentiment: string;
+  news_last_updated: string | null;
+  ai_enabled: boolean;
+  indicators_active: number;
+  investor_perspectives: number;
+}
+
 export interface AutoTraderData {
   enabled: boolean;
   running: boolean;
@@ -283,6 +292,7 @@ export interface AutoTraderData {
   portfolio_heat: number;
   stats: AutoTraderStats;
   risk_status: { can_trade: boolean; reason: string; max_positions?: number; positions?: number; portfolio_heat?: number; cash_available?: number };
+  intelligence?: AutoTraderIntelligence;
 }
 
 // Navigation

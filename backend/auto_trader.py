@@ -1,12 +1,17 @@
 """
-AUTO TRADER ENGINE — The Emotionless Master Trader
-===================================================
+AUTO TRADER ENGINE — The Emotionless Master Trader (ULTIMATE)
+==============================================================
 No human emotions. Pure intelligence. Patient. Precise.
-Waits for perfect confluence, then strikes.
+Uses EVERY available intelligence source:
 
-Uses 12 technical indicators + 5 legendary investor perspectives
-+ news sentiment to score opportunities 0-100.
-Only trades when confluence >= 75/100.
+ 1. 12 Technical Indicators (RSI, MACD, Bollinger, EMA, Supertrend, ADX,
+    Stochastic, VWAP, Volume, OBV, ATR)
+ 2. 5 Legendary Investor Perspectives (Jhunjhunwala, Buffett, Burry, Wood, Lynch)
+ 3. Live News Sentiment (Moneycontrol, ET, NewsAPI)
+ 4. Claude AI Final Confirmation (for high-confluence trades)
+
+Confluence scoring: 0-110 across 9 factors.
+Only trades when confluence >= 75/110.
 
 Risk management: position sizing, trailing stops, portfolio heat,
 daily circuit breaker, time-based exits.
@@ -14,14 +19,18 @@ daily circuit breaker, time-based exits.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import time
 from datetime import datetime, timedelta
 from typing import Optional, List
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
 from market_engine import fetch_all_stocks
 from investor_perspectives import analyze_through_investor_lenses
+from news_engine import get_market_news, classify_sentiment, match_stocks_in_headline, get_overall_sentiment
 from auto_store import (
     load_auto_config, get_portfolio, add_position, close_position,
     update_trailing_stop, update_position_prices, get_open_positions,
@@ -30,11 +39,29 @@ from auto_store import (
 )
 
 logger = logging.getLogger(__name__)
-executor = ThreadPoolExecutor(max_workers=2)
+executor = ThreadPoolExecutor(max_workers=3)
+
+
+def _get_anthropic_client():
+    """Get Anthropic client for Claude AI confirmation."""
+    try:
+        from anthropic import Anthropic
+        key = os.getenv("ANTHROPIC_API_KEY", "")
+        if not key:
+            env_path = Path(__file__).parent / ".env"
+            if env_path.exists():
+                for line in env_path.read_text().splitlines():
+                    if line.startswith("ANTHROPIC_API_KEY="):
+                        key = line.split("=", 1)[1].strip()
+        if key:
+            return Anthropic(api_key=key)
+    except Exception as e:
+        logger.warning(f"Could not init Anthropic client: {e}")
+    return None
 
 
 class AutoTrader:
-    """The Master — continuous market scanner and paper trader."""
+    """The ULTIMATE Master — uses ALL intelligence to trade."""
 
     def __init__(self, config: dict):
         self.config = config
@@ -43,6 +70,11 @@ class AutoTrader:
         self.scan_count = 0
         self.last_scan_data: dict = {}
         self._task: Optional[asyncio.Task] = None
+        # Cached intelligence from latest scan
+        self._cached_news: List[dict] = []
+        self._cached_news_time: Optional[datetime] = None
+        self._cached_sentiment: dict = {}
+        self._ai_client = _get_anthropic_client()
 
     async def start(self):
         self.running = True
@@ -85,31 +117,35 @@ class AutoTrader:
                 await asyncio.sleep(30)
 
     async def scan_cycle(self):
-        """One full scan: fetch data, evaluate entries, check exits."""
+        """One full scan: fetch data + news, evaluate entries, check exits."""
         start_time = time.time()
         self.scan_count += 1
-        logger.info(f"🤖 Scan #{self.scan_count} starting...")
+        logger.info(f"🤖 Scan #{self.scan_count} starting — FULL INTELLIGENCE MODE...")
 
         try:
-            # 1. Fetch all stocks with indicators (in thread pool)
             loop = asyncio.get_event_loop()
+
+            # 1. Fetch all stocks with indicators (in thread pool)
             all_stocks = await loop.run_in_executor(executor, fetch_all_stocks)
 
             if not all_stocks:
                 logger.warning("🤖 No stock data received, skipping scan")
                 return
 
-            # 2. Update current prices for open positions
+            # 2. Fetch fresh news (every 5 minutes max to avoid rate limits)
+            await self._refresh_news()
+
+            # 3. Update current prices for open positions
             prices = {s["symbol"]: s["price"] for s in all_stocks if s.get("price")}
             update_position_prices(prices)
 
-            # 3. Check exits for open positions FIRST (before entries)
+            # 4. Check exits for open positions FIRST (before entries)
             await self._check_exits(all_stocks)
 
-            # 4. Risk check — can we take new trades?
+            # 5. Risk check — can we take new trades?
             risk = self._check_risk_limits()
 
-            # 5. Evaluate entries
+            # 6. Evaluate entries with FULL intelligence
             pending_signals = []
             entries_made = 0
 
@@ -118,6 +154,26 @@ class AutoTrader:
                     result = self._evaluate_entry(stock)
                     if result:
                         if result["confluence"] >= self.config.get("min_confluence", 75):
+                            # HIGH CONFLUENCE — get Claude AI confirmation for 85+ trades
+                            ai_confirmed = True
+                            ai_reasoning = ""
+                            if result["confluence"] >= 85 and self._ai_client and self.config.get("use_ai_confirmation", True):
+                                ai_result = await self._get_ai_confirmation(stock, result)
+                                ai_confirmed = ai_result.get("confirmed", True)
+                                ai_reasoning = ai_result.get("reasoning", "")
+                                if not ai_confirmed:
+                                    logger.info(f"🤖🧠 AI REJECTED {stock['symbol']} — {ai_reasoning}")
+                                    result["reasons"].append(f"⚠️ AI rejected: {ai_reasoning}")
+                                    pending_signals.append({
+                                        "symbol": stock["symbol"],
+                                        "name": stock.get("name", ""),
+                                        "price": stock.get("price", 0),
+                                        "confluence_score": result["confluence"],
+                                        "missing": [f"AI rejected: {ai_reasoning}"],
+                                        "met_conditions": result.get("reasons", []),
+                                    })
+                                    continue
+
                             # EXECUTE PAPER TRADE
                             trade = self._execute_entry(stock, result)
                             if trade:
@@ -132,6 +188,9 @@ class AutoTrader:
                                     "target_1": trade["target_1"],
                                     "shares": trade["shares"],
                                     "reasoning": result["reasons"],
+                                    "ai_confirmation": ai_reasoning if ai_reasoning else "N/A",
+                                    "news_sentiment": result.get("news_sentiment", "N/A"),
+                                    "investor_consensus": result.get("investor_data", {}),
                                     "indicator_snapshot": self._snapshot(stock),
                                 })
                         elif result["confluence"] >= 55:
@@ -145,7 +204,7 @@ class AutoTrader:
                                 "met_conditions": result.get("reasons", []),
                             })
 
-            # 6. Save scan result
+            # 7. Save scan result
             elapsed = round(time.time() - start_time, 1)
             portfolio = get_portfolio()
             save_scan_result({
@@ -157,6 +216,8 @@ class AutoTrader:
                 "risk_status": risk,
                 "elapsed_seconds": elapsed,
                 "today_pnl": portfolio.get("today_pnl", 0),
+                "news_count": len(self._cached_news),
+                "market_sentiment": self._cached_sentiment.get("sentiment", "N/A"),
             })
 
             self.last_scan = datetime.now()
@@ -164,16 +225,141 @@ class AutoTrader:
                 "pending_signals": pending_signals[:10],
                 "scan_count": self.scan_count,
                 "entries_made": entries_made,
+                "news_sentiment": self._cached_sentiment.get("sentiment", "N/A"),
             }
 
             logger.info(
                 f"🤖 Scan #{self.scan_count} done in {elapsed}s — "
                 f"{entries_made} entries, {len(get_open_positions())} open positions, "
-                f"{len(pending_signals)} watching"
+                f"{len(pending_signals)} watching | "
+                f"News: {self._cached_sentiment.get('sentiment', 'N/A')} "
+                f"({len(self._cached_news)} articles)"
             )
 
         except Exception as e:
             logger.error(f"🤖 Scan cycle error: {e}", exc_info=True)
+
+    # ── NEWS INTELLIGENCE ─────────────────────────────────────────────────
+
+    async def _refresh_news(self):
+        """Fetch fresh news every 5 minutes."""
+        now = datetime.now()
+        if self._cached_news_time and (now - self._cached_news_time).total_seconds() < 300:
+            return  # Use cached news
+        try:
+            self._cached_news = await get_market_news()
+            self._cached_sentiment = get_overall_sentiment(self._cached_news)
+            self._cached_news_time = now
+            logger.info(
+                f"🤖📰 News refreshed: {len(self._cached_news)} articles, "
+                f"Sentiment: {self._cached_sentiment.get('sentiment', 'N/A')}"
+            )
+        except Exception as e:
+            logger.warning(f"🤖 News fetch failed: {e}")
+
+    def _get_stock_news_sentiment(self, symbol: str) -> dict:
+        """Get news sentiment for a specific stock."""
+        if not self._cached_news:
+            return {"sentiment": "NEUTRAL", "bullish": 0, "bearish": 0, "headlines": []}
+
+        symbol_clean = symbol.replace(".NS", "").upper()
+        stock_news = []
+        for n in self._cached_news:
+            affected = n.get("affected_stocks", [])
+            headline = n.get("headline", "")
+            # Direct match or keyword in headline
+            if symbol in affected or symbol_clean in headline.upper():
+                stock_news.append(n)
+
+        if not stock_news:
+            # Check sector-level sentiment as fallback
+            return {
+                "sentiment": self._cached_sentiment.get("sentiment", "NEUTRAL"),
+                "bullish": 0, "bearish": 0,
+                "headlines": [],
+                "market_level": True,
+            }
+
+        bull = sum(1 for n in stock_news if n.get("sentiment") == "BULLISH")
+        bear = sum(1 for n in stock_news if n.get("sentiment") == "BEARISH")
+
+        if bull > bear:
+            sent = "BULLISH"
+        elif bear > bull:
+            sent = "BEARISH"
+        else:
+            sent = "NEUTRAL"
+
+        return {
+            "sentiment": sent,
+            "bullish": bull,
+            "bearish": bear,
+            "headlines": [n.get("headline", "") for n in stock_news[:3]],
+            "market_level": False,
+        }
+
+    # ── CLAUDE AI CONFIRMATION ────────────────────────────────────────────
+
+    async def _get_ai_confirmation(self, stock: dict, analysis: dict) -> dict:
+        """Ask Claude AI to confirm/reject a high-confluence trade.
+        Only called for confluence >= 85 to save API credits."""
+        if not self._ai_client:
+            return {"confirmed": True, "reasoning": "AI unavailable — proceeding on indicators"}
+
+        try:
+            ind = stock.get("indicators", {})
+            news_info = self._get_stock_news_sentiment(stock["symbol"])
+
+            prompt = f"""You are a RISK MANAGER for an automated paper trading system.
+A trade has scored {analysis['confluence']}/110 confluence. Review and APPROVE or REJECT.
+
+STOCK: {stock.get('name', '')} ({stock['symbol']})
+PRICE: ₹{stock.get('price', 0):.2f}
+CHANGE: {stock.get('change_percent', 0):.2f}%
+
+CONFLUENCE REASONS (why system wants to buy):
+{json.dumps(analysis['reasons'], indent=2)}
+
+MISSING CONDITIONS:
+{json.dumps(analysis.get('missing', []), indent=2)}
+
+KEY INDICATORS:
+- RSI: {ind.get('rsi', {}).get('value', 'N/A')}
+- MACD: {ind.get('macd', {}).get('vote', 'N/A')}
+- Supertrend: {ind.get('supertrend', {}).get('direction', 'N/A')}
+- ADX: {ind.get('adx', {}).get('adx', 'N/A')}
+- Volume Spike: {ind.get('volume', {}).get('spike', 'N/A')}
+
+NEWS SENTIMENT: {news_info.get('sentiment', 'N/A')}
+NEWS HEADLINES: {json.dumps(news_info.get('headlines', [])[:3])}
+
+MARKET SENTIMENT: {self._cached_sentiment.get('sentiment', 'N/A')}
+
+Respond ONLY with JSON: {{"confirmed": true/false, "reasoning": "one sentence why"}}"""
+
+            loop = asyncio.get_event_loop()
+
+            def _call_ai():
+                resp = self._ai_client.messages.create(
+                    model="claude-sonnet-4-20250514",
+                    max_tokens=200,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                text = resp.content[0].text.strip()
+                if text.startswith("```"):
+                    text = text.split("```")[1]
+                    if text.startswith("json"):
+                        text = text[4:]
+                    text = text.strip()
+                return json.loads(text)
+
+            result = await loop.run_in_executor(executor, _call_ai)
+            logger.info(f"🤖🧠 AI review for {stock['symbol']}: {'✅ APPROVED' if result.get('confirmed') else '❌ REJECTED'} — {result.get('reasoning', '')}")
+            return result
+
+        except Exception as e:
+            logger.warning(f"🤖 AI confirmation failed: {e} — proceeding with trade")
+            return {"confirmed": True, "reasoning": f"AI error: {e} — proceeding on indicators"}
 
     # ── ENTRY LOGIC ────────────────────────────────────────────────────
 
@@ -285,9 +471,18 @@ class AutoTrader:
             missing.append(f"Low volume: {vol_ratio:.1f}x")
 
         # 7. Investor consensus (max 15 pts)
+        investor_summary = {}
         try:
             investor_data = analyze_through_investor_lenses(stock, ind)
             bullish = investor_data.get("consensus", {}).get("bullish_count", 0)
+            investor_summary = {
+                "bullish_count": bullish,
+                "key_insight": investor_data.get("consensus", {}).get("key_insight", ""),
+                "perspectives": [
+                    {"investor": p["investor"], "signal": p["signal"]}
+                    for p in investor_data.get("investor_perspectives", [])
+                ],
+            }
             if bullish >= 4:
                 score += 15
                 reasons.append(f"Strong investor consensus: {bullish}/5 bullish")
@@ -311,13 +506,42 @@ class AutoTrader:
             score -= 5
             missing.append(f"Near Bollinger upper band ({bb_pct:.0%}) — risky entry")
 
+        # 9. NEWS SENTIMENT (max 10 pts) — NEW INTELLIGENCE FACTOR
+        news_data = self._get_stock_news_sentiment(symbol)
+        news_sent = news_data.get("sentiment", "NEUTRAL")
+        is_stock_specific = not news_data.get("market_level", True)
+
+        if is_stock_specific:
+            # Stock-specific news — stronger signal
+            if news_sent == "BULLISH":
+                score += 10
+                headlines = news_data.get("headlines", [])
+                reasons.append(f"📰 Bullish news ({news_data['bullish']} articles): {headlines[0][:60] if headlines else 'positive coverage'}")
+            elif news_sent == "BEARISH":
+                score -= 10
+                headlines = news_data.get("headlines", [])
+                missing.append(f"📰 Bearish news ({news_data['bearish']} articles): {headlines[0][:60] if headlines else 'negative coverage'}")
+            else:
+                reasons.append("📰 Neutral stock news — no headwind")
+        else:
+            # Market-level sentiment — weaker signal
+            if news_sent == "BULLISH":
+                score += 5
+                reasons.append("📰 Bullish market sentiment (overall)")
+            elif news_sent == "BEARISH":
+                score -= 3
+                missing.append("📰 Bearish market sentiment — trade cautiously")
+            # NEUTRAL market = no adjustment
+
         # Clamp
-        score = max(0, min(100, score))
+        score = max(0, min(110, score))
 
         return {
             "confluence": score,
             "reasons": reasons,
             "missing": missing,
+            "news_sentiment": news_sent,
+            "investor_data": investor_summary,
         }
 
     def _execute_entry(self, stock: dict, analysis: dict) -> Optional[dict]:
@@ -572,21 +796,36 @@ class AutoTrader:
             return 0
 
     def _snapshot(self, stock: dict) -> dict:
-        """Capture indicator state at trade time."""
+        """Capture FULL indicator + news state at trade time."""
         ind = stock.get("indicators", {})
+        news_data = self._get_stock_news_sentiment(stock.get("symbol", ""))
         return {
             "price": stock.get("price"),
+            "change_percent": stock.get("change_percent"),
             "score": stock.get("score"),
             "signal": stock.get("signal"),
+            "votes": stock.get("votes"),
+            # All 12 indicators
             "rsi": ind.get("rsi", {}).get("value"),
             "macd_vote": ind.get("macd", {}).get("vote"),
+            "macd_histogram": ind.get("macd", {}).get("histogram"),
             "supertrend": ind.get("supertrend", {}).get("direction"),
             "ema_align": ind.get("ema_crossover", {}).get("alignment"),
             "adx": ind.get("adx", {}).get("adx"),
+            "adx_trend": ind.get("adx", {}).get("trend_strength"),
             "bb_pct": ind.get("bollinger", {}).get("pct_b"),
+            "stochastic_k": ind.get("stochastic", {}).get("k"),
+            "stochastic_d": ind.get("stochastic", {}).get("d"),
             "volume_spike": ind.get("volume", {}).get("spike"),
             "volume_ratio": ind.get("volume", {}).get("ratio"),
             "vwap_vote": ind.get("vwap", {}).get("vote"),
+            "obv_trend": ind.get("obv", {}).get("trend"),
+            # News at time of trade
+            "news_sentiment": news_data.get("sentiment"),
+            "news_headlines": news_data.get("headlines", [])[:2],
+            "market_sentiment": self._cached_sentiment.get("sentiment"),
+            # Timestamp
+            "snapshot_time": datetime.now().isoformat(),
         }
 
     def get_status(self) -> dict:
@@ -611,4 +850,13 @@ class AutoTrader:
             "portfolio_heat": risk.get("portfolio_heat", 0),
             "stats": stats,
             "risk_status": risk,
+            # Intelligence status
+            "intelligence": {
+                "news_articles": len(self._cached_news),
+                "market_sentiment": self._cached_sentiment.get("sentiment", "N/A"),
+                "news_last_updated": self._cached_news_time.isoformat() if self._cached_news_time else None,
+                "ai_enabled": self._ai_client is not None and self.config.get("use_ai_confirmation", True),
+                "indicators_active": 12,
+                "investor_perspectives": 5,
+            },
         }

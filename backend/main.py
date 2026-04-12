@@ -503,6 +503,28 @@ def get_auto_performance():
     }
 
 
+@app.post("/api/auto-trader/scan-now")
+async def force_scan_now():
+    """Force a scan cycle immediately (for testing outside market hours)."""
+    global auto_trader
+    if not auto_trader:
+        # Start a temporary auto trader for the scan
+        cfg = load_auto_config()
+        auto_trader = AutoTrader(cfg)
+        auto_trader.running = True
+
+    try:
+        await auto_trader.scan_cycle()
+        return {
+            "status": "scan_complete",
+            "scan_count": auto_trader.scan_count,
+            "last_scan": auto_trader.last_scan.isoformat() if auto_trader.last_scan else None,
+            "data": auto_trader.last_scan_data,
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
 # ── WebSocket ──────────────────────────────────────────────────────────
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
