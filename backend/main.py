@@ -9,7 +9,7 @@ import json
 import logging
 from datetime import datetime
 from contextlib import asynccontextmanager
-from typing import List
+from typing import List, Optional
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -32,6 +32,13 @@ from data_store import (
     save_daily_capital, get_daily_capital, get_mode_returns,
 )
 from chart_engine import fetch_chart_data, fetch_intraday_chart, fetch_swing_chart, fetch_positional_chart
+from auto_trader import AutoTrader
+from auto_store import (
+    load_auto_config, save_auto_config,
+    get_portfolio as get_auto_portfolio, get_open_positions as get_auto_positions,
+    get_trade_journal, get_pending_signals, get_scan_history,
+    get_portfolio_stats as get_auto_stats, get_daily_summaries,
+)
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -42,6 +49,7 @@ latest_dashboard: dict = {}
 connected_clients: List[WebSocket] = []
 user_config: dict = load_config()
 executor = ThreadPoolExecutor(max_workers=4)
+auto_trader: Optional[AutoTrader] = None
 
 
 # ── Core Analysis Loop ─────────────────────────────────────────────────
@@ -201,12 +209,37 @@ async def broadcast(data: dict):
 
 
 # ── App Lifecycle ──────────────────────────────────────────────────────
+async def _market_hours_refresh_loop():
+    """Auto-refresh every 10 minutes ONLY during market hours (9:15 AM - 3:30 PM IST).
+    Calls Claude API for full analysis. Outside market hours, does nothing."""
+    while True:
+        await asyncio.sleep(600)  # 10 minutes
+        if _is_market_open():
+            logger.info("⏰ Market hours auto-refresh (10 min interval)...")
+            await run_analysis()
+        else:
+            logger.debug("⏰ Outside market hours — skipping auto-refresh")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global auto_trader
     asyncio.create_task(run_analysis())
-    # No auto-refresh scheduler — manual refresh only to save API credits
-    logger.info("🚀 Trading Command Center started (manual refresh mode)")
+
+    # Start 10-min refresh loop (only active during market hours)
+    asyncio.create_task(_market_hours_refresh_loop())
+
+    # Start auto trader if enabled
+    auto_cfg = load_auto_config()
+    if auto_cfg.get("enabled", False):
+        auto_trader = AutoTrader(auto_cfg)
+        asyncio.create_task(auto_trader.start())
+
+    logger.info("🚀 Trading Command Center started (10-min market-hours refresh + manual)")
     yield
+
+    if auto_trader:
+        await auto_trader.stop()
 
 
 app = FastAPI(title="AI Trading Command Center v2", version="2.0.0", lifespan=lifespan)
@@ -378,6 +411,96 @@ def get_stock_investor_perspectives(symbol: str):
             return investor_analysis
 
     return {"error": f"Stock {symbol} not found"}
+
+
+# ── Auto Trader Endpoints ─────────────────────────────────────────────
+
+@app.post("/api/auto-trader/toggle")
+async def toggle_auto_trader(body: dict):
+    """Enable/disable auto trading."""
+    global auto_trader
+    enabled = body.get("enabled", False)
+
+    if enabled and not auto_trader:
+        cfg = load_auto_config()
+        cfg["enabled"] = True
+        save_auto_config(cfg)
+        auto_trader = AutoTrader(cfg)
+        asyncio.create_task(auto_trader.start())
+        return {"status": "started", "enabled": True}
+    elif not enabled and auto_trader:
+        await auto_trader.stop()
+        auto_trader = None
+        cfg = load_auto_config()
+        cfg["enabled"] = False
+        save_auto_config(cfg)
+        return {"status": "stopped", "enabled": False}
+    return {"status": "no_change", "enabled": auto_trader is not None}
+
+
+@app.get("/api/auto-trader/status")
+def get_auto_trader_status():
+    if auto_trader:
+        return auto_trader.get_status()
+    return {
+        "enabled": False, "running": False, "test_mode": True,
+        "positions": [], "pending_signals": [],
+        "capital": load_auto_config().get("capital", 100000),
+        "cash_available": load_auto_config().get("capital", 100000),
+        "today_pnl": 0, "total_pnl": 0, "portfolio_heat": 0,
+        "stats": get_auto_stats(), "scan_count": 0,
+    }
+
+
+@app.get("/api/auto-trader/config")
+def get_auto_config():
+    return load_auto_config()
+
+
+@app.post("/api/auto-trader/config")
+def update_auto_config(config: dict):
+    save_auto_config(config)
+    if auto_trader:
+        auto_trader.config = load_auto_config()
+    return {"status": "saved", "config": load_auto_config()}
+
+
+@app.get("/api/auto-trader/portfolio")
+def get_auto_portfolio_endpoint():
+    return get_auto_portfolio()
+
+
+@app.get("/api/auto-trader/positions")
+def get_auto_positions_endpoint():
+    return get_auto_positions()
+
+
+@app.get("/api/auto-trader/journal")
+def get_auto_journal(last_n: int = 50):
+    return get_trade_journal(last_n)
+
+
+@app.get("/api/auto-trader/journal/stats")
+def get_auto_journal_stats():
+    return get_auto_stats()
+
+
+@app.get("/api/auto-trader/pending-signals")
+def get_auto_pending():
+    return get_pending_signals()
+
+
+@app.get("/api/auto-trader/scan-history")
+def get_auto_scans(last_n: int = 20):
+    return get_scan_history(last_n)
+
+
+@app.get("/api/auto-trader/performance")
+def get_auto_performance():
+    return {
+        "stats": get_auto_stats(),
+        "daily_summaries": get_daily_summaries(30),
+    }
 
 
 # ── WebSocket ──────────────────────────────────────────────────────────

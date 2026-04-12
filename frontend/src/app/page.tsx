@@ -17,6 +17,7 @@ import ModeScreen from "@/components/ModeScreen";
 import PortfolioDashboard from "@/components/PortfolioDashboard";
 import NewsAlerts from "@/components/NewsAlerts";
 import LoginPage from "@/components/LoginPage";
+import AutoTraderDashboard from "@/components/AutoTraderDashboard";
 import { LogOut } from "lucide-react";
 
 export default function Dashboard() {
@@ -176,6 +177,11 @@ export default function Dashboard() {
               goal={data?.goal ?? {}}
               projection={data?.goal_projection ?? emptyProjection}
             />
+          )}
+
+          {/* Auto Trader Screen */}
+          {activeTab === "auto-trader" && (
+            <AutoTraderDashboard />
           )}
 
           {/* News Screen */}

@@ -209,8 +209,84 @@ export interface NewsTrade {
   sectors: string[];
 }
 
+// Auto Trader Types
+export interface AutoTraderPosition {
+  symbol: string;
+  name: string;
+  entry_price: number;
+  entry_time: string;
+  shares: number;
+  capital_deployed: number;
+  stop_loss: number;
+  trailing_stop: number;
+  target_1: number;
+  target_2: number;
+  target_1_hit: boolean;
+  partial_exit_done: boolean;
+  confluence_score: number;
+  entry_reasoning: string[];
+  current_price: number;
+  unrealized_pnl: number;
+  unrealized_pnl_pct: number;
+  status: "OPEN" | "PARTIAL_EXIT" | "CLOSED";
+  atr: number;
+}
+
+export interface AutoTraderPendingSignal {
+  symbol: string;
+  name: string;
+  price: number;
+  confluence_score: number;
+  missing: string[];
+  met_conditions: string[];
+}
+
+export interface AutoTraderJournalEntry {
+  timestamp: string;
+  symbol: string;
+  action: "ENTER" | "EXIT" | "PARTIAL_EXIT" | "SKIP";
+  confluence_score?: number;
+  entry_price?: number;
+  exit_price?: number;
+  pnl?: number;
+  pnl_pct?: number;
+  reasoning: string[];
+  hold_duration_minutes?: number;
+}
+
+export interface AutoTraderStats {
+  total_trades: number;
+  winning_trades: number;
+  losing_trades: number;
+  win_rate: number;
+  total_pnl: number;
+  total_pnl_pct: number;
+  avg_win: number;
+  avg_loss: number;
+  best_trade: { symbol: string; pnl: number } | null;
+  worst_trade: { symbol: string; pnl: number } | null;
+  max_drawdown: number;
+}
+
+export interface AutoTraderData {
+  enabled: boolean;
+  running: boolean;
+  test_mode: boolean;
+  scan_count: number;
+  last_scan: string | null;
+  positions: AutoTraderPosition[];
+  pending_signals: AutoTraderPendingSignal[];
+  capital: number;
+  cash_available: number;
+  today_pnl: number;
+  total_pnl: number;
+  portfolio_heat: number;
+  stats: AutoTraderStats;
+  risk_status: { can_trade: boolean; reason: string; max_positions?: number; positions?: number; portfolio_heat?: number; cash_available?: number };
+}
+
 // Navigation
-export type ScreenTab = "dashboard" | "intraday" | "swing" | "positional" | "options" | "portfolio" | "news";
+export type ScreenTab = "dashboard" | "intraday" | "swing" | "positional" | "options" | "portfolio" | "news" | "auto-trader";
 
 export interface DashboardData {
   timestamp: string;

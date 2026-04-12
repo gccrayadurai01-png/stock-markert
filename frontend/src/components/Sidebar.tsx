@@ -16,6 +16,7 @@ const TABS: { id: ScreenTab; label: string; icon: string; color: string }[] = [
   { id: "options", label: "Options", icon: "🎯", color: "text-red" },
   { id: "portfolio", label: "Portfolio", icon: "💰", color: "text-green" },
   { id: "news", label: "News", icon: "📰", color: "text-yellow" },
+  { id: "auto-trader", label: "Auto Trader", icon: "🤖", color: "text-green" },
 ];
 
 export default function Sidebar({ activeTab, onTabChange, connected }: Props) {
