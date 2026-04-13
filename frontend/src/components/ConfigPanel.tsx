@@ -47,75 +47,58 @@ export default function ConfigPanel({
   };
 
   return (
-    <header className="bg-card border-b border-border sticky top-0 z-50">
-      <div className="max-w-[1920px] mx-auto px-4 py-2.5 flex items-center justify-between gap-3 flex-wrap">
+    <header className="bg-card border-b border-border sticky top-0 z-40 md:z-50">
+      <div className="max-w-[1920px] mx-auto px-3 py-2 flex items-center justify-between gap-2">
         {editing ? (
-          <div className="flex items-center gap-3 flex-wrap flex-1">
-            <div className="flex items-center gap-1.5">
-              <label className="text-[10px] text-muted font-semibold">Capital ₹</label>
-              <input
-                type="text"
-                inputMode="numeric"
-                value={form.capital}
+          <div className="flex items-center gap-2 flex-wrap flex-1">
+            <div className="flex items-center gap-1">
+              <label className="text-[10px] text-muted font-semibold hidden sm:block">₹</label>
+              <input type="text" inputMode="numeric" value={form.capital} placeholder="Capital"
                 onChange={(e) => setForm({ ...form, capital: e.target.value })}
-                className="w-28 bg-background text-foreground text-xs px-2 py-1.5 rounded border border-border outline-none focus:border-accent"
-                autoFocus
-              />
+                className="w-24 bg-background text-foreground text-xs px-2 py-1.5 rounded border border-border outline-none focus:border-accent" autoFocus />
             </div>
-            <div className="flex items-center gap-1.5">
-              <label className="text-[10px] text-muted font-semibold">Risk %</label>
-              <input
-                type="text"
-                inputMode="decimal"
-                value={form.risk}
+            <div className="flex items-center gap-1">
+              <label className="text-[10px] text-muted font-semibold hidden sm:block">R%</label>
+              <input type="text" inputMode="decimal" value={form.risk} placeholder="Risk%"
                 onChange={(e) => setForm({ ...form, risk: e.target.value })}
-                className="w-16 bg-background text-foreground text-xs px-2 py-1.5 rounded border border-border outline-none focus:border-accent"
-              />
+                className="w-14 bg-background text-foreground text-xs px-2 py-1.5 rounded border border-border outline-none focus:border-accent" />
             </div>
-            <div className="flex items-center gap-1.5">
-              <label className="text-[10px] text-muted font-semibold">Max Stocks</label>
-              <input
-                type="text"
-                inputMode="numeric"
-                value={form.maxTrades}
+            <div className="flex items-center gap-1">
+              <label className="text-[10px] text-muted font-semibold hidden sm:block">Max</label>
+              <input type="text" inputMode="numeric" value={form.maxTrades} placeholder="Max"
                 onChange={(e) => setForm({ ...form, maxTrades: e.target.value })}
-                className="w-12 bg-background text-foreground text-xs px-2 py-1.5 rounded border border-border outline-none focus:border-accent"
-              />
+                className="w-10 bg-background text-foreground text-xs px-2 py-1.5 rounded border border-border outline-none focus:border-accent" />
             </div>
-            <button onClick={save} className="bg-accent text-white text-xs px-3 py-1.5 rounded hover:bg-accent/80 font-semibold">
-              Save
-            </button>
-            <button onClick={() => setEditing(false)} className="text-xs text-muted hover:text-foreground">
-              Cancel
-            </button>
+            <button onClick={save} className="bg-accent text-white text-xs px-3 py-1.5 rounded font-semibold">Save</button>
+            <button onClick={() => setEditing(false)} className="text-xs text-muted">✕</button>
           </div>
         ) : (
-          <div className="flex items-center gap-4 flex-wrap flex-1">
-            <button
-              onClick={startEditing}
-              className="flex items-center gap-3 bg-background rounded-lg px-3 py-1.5 hover:bg-card-hover transition-colors"
-            >
-              <div className="text-xs"><span className="text-muted">Capital: </span><span className="font-bold">₹{capital.toLocaleString("en-IN")}</span></div>
-              <div className="text-xs"><span className="text-muted">Risk: </span><span className="font-bold text-yellow">{riskPercent}%</span></div>
-              <div className="text-xs"><span className="text-muted">Stocks: </span><span className="font-bold">{maxTrades}</span></div>
-              <span className="text-[10px] text-accent font-semibold">edit</span>
-            </button>
-          </div>
+          <button onClick={startEditing}
+            className="flex items-center gap-2 bg-background rounded-lg px-2.5 py-1.5 hover:bg-white/5 transition-colors flex-1 min-w-0">
+            <span className="text-xs truncate">
+              <span className="text-muted">₹</span><span className="font-bold">{capital.toLocaleString("en-IN")}</span>
+              <span className="text-muted ml-2 hidden sm:inline">Risk: </span><span className="font-bold text-yellow hidden sm:inline">{riskPercent}%</span>
+              <span className="text-muted ml-2 hidden sm:inline">Stocks: </span><span className="font-bold hidden sm:inline">{maxTrades}</span>
+            </span>
+            <span className="text-[10px] text-accent font-semibold shrink-0">edit</span>
+          </button>
         )}
 
         {/* Status */}
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-1.5">
-            <div className={`w-2 h-2 rounded-full ${marketStatus === "OPEN" ? "bg-green animate-pulse-green" : "bg-red"}`} />
-            <span className="text-[10px] font-semibold">{marketStatus === "OPEN" ? "LIVE" : "CLOSED"}</span>
+        <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center gap-1">
+            <div className={`w-2 h-2 rounded-full ${marketStatus === "OPEN" ? "bg-green animate-pulse" : "bg-red"}`} />
+            <span className="text-[10px] font-semibold hidden sm:block">{marketStatus === "OPEN" ? "LIVE" : "CLOSED"}</span>
           </div>
-          <div className="flex items-center gap-1.5">
+          <div className="hidden sm:flex items-center gap-1">
             <div className={`w-1.5 h-1.5 rounded-full ${connected ? "bg-green" : "bg-red"}`} />
             <span className="text-[10px] text-muted">{connected ? "WS" : "OFF"}</span>
           </div>
-          {lastUpdate && <span className="text-[10px] text-muted">{lastUpdate.toLocaleTimeString("en-IN")}</span>}
-          <button onClick={onRefresh} className="bg-green hover:bg-green/80 text-white text-xs font-black px-4 py-2 rounded-lg animate-pulse shadow-lg shadow-green/20">
-            REFRESH ANALYSIS
+          {lastUpdate && <span className="text-[10px] text-muted hidden md:block">{lastUpdate.toLocaleTimeString("en-IN")}</span>}
+          <button onClick={onRefresh}
+            className="bg-green hover:bg-green/80 text-white text-[10px] sm:text-xs font-black px-2 sm:px-4 py-1.5 sm:py-2 rounded-lg shadow-lg shadow-green/20">
+            <span className="hidden sm:inline">REFRESH ANALYSIS</span>
+            <span className="sm:hidden">⟳ REFRESH</span>
           </button>
         </div>
       </div>

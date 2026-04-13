@@ -82,39 +82,27 @@ export default function AutoTraderDashboard({ initialData }: Props) {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div className="flex items-center gap-3">
-          <span className="text-3xl">🤖</span>
+          <span className="text-2xl sm:text-3xl">🤖</span>
           <div>
-            <h1 className="text-2xl font-black text-foreground">AUTO TRADER</h1>
-            <p className="text-xs text-muted">
-              Emotionless. Patient. Precise. — Paper Trading Mode
-            </p>
+            <h1 className="text-xl sm:text-2xl font-black text-foreground">AUTO TRADER</h1>
+            <p className="text-xs text-muted">Emotionless. Patient. Precise.</p>
           </div>
           {data?.test_mode && (
-            <span className="text-[10px] bg-yellow/20 text-yellow px-2 py-1 rounded-full font-bold">
-              TEST MODE — Week 1
-            </span>
+            <span className="text-[10px] bg-yellow/20 text-yellow px-2 py-1 rounded-full font-bold">TEST</span>
           )}
         </div>
 
-        <div className="flex items-center gap-3">
-          <button
-            onClick={forceScan}
-            disabled={scanning}
-            className="px-4 py-3 rounded-xl font-black text-sm bg-accent hover:bg-accent/80 text-white transition-all shadow-lg shadow-accent/20"
-          >
-            {scanning ? "⏳ SCANNING..." : "🔍 SCAN NOW"}
+        <div className="flex items-center gap-2">
+          <button onClick={forceScan} disabled={scanning}
+            className="flex-1 sm:flex-none px-3 sm:px-4 py-2.5 rounded-xl font-black text-xs sm:text-sm bg-accent hover:bg-accent/80 text-white transition-all shadow-lg shadow-accent/20">
+            {scanning ? "⏳..." : "🔍 SCAN NOW"}
           </button>
-          <button
-            onClick={toggleAutoTrader}
-            disabled={toggling}
-            className={`px-6 py-3 rounded-xl font-black text-sm transition-all ${
-              enabled
-                ? "bg-green text-white shadow-lg shadow-green/30 animate-pulse"
-                : "bg-card border-2 border-border text-muted hover:border-green hover:text-green"
-            }`}
-          >
+          <button onClick={toggleAutoTrader} disabled={toggling}
+            className={`flex-1 sm:flex-none px-4 sm:px-6 py-2.5 rounded-xl font-black text-xs sm:text-sm transition-all ${
+              enabled ? "bg-green text-white shadow-lg shadow-green/30 animate-pulse" : "bg-card border-2 border-border text-muted hover:border-green hover:text-green"
+            }`}>
             {toggling ? "..." : enabled ? "AUTO: ON" : "AUTO: OFF"}
           </button>
         </div>
@@ -122,7 +110,7 @@ export default function AutoTraderDashboard({ initialData }: Props) {
 
       {/* Intelligence Status Bar */}
       {data?.intelligence && (
-        <div className="bg-gradient-to-r from-accent/10 via-purple-500/10 to-green/10 rounded-xl border border-accent/30 px-4 py-3 flex items-center justify-between">
+        <div className="bg-gradient-to-r from-accent/10 via-purple-500/10 to-green/10 rounded-xl border border-accent/30 px-3 py-2.5 flex items-center justify-between gap-2 overflow-x-auto">
           <div className="flex items-center gap-4">
             <span className="text-xs font-black text-accent uppercase">🧠 Intelligence</span>
             <span className="text-[10px] px-2 py-0.5 rounded-full bg-green/20 text-green font-bold">
@@ -149,7 +137,7 @@ export default function AutoTraderDashboard({ initialData }: Props) {
       )}
 
       {/* Status Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2 sm:gap-3">
         <StatusCard
           label="Status"
           value={running ? "SCANNING" : enabled ? "WAITING" : "OFF"}

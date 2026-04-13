@@ -76,11 +76,12 @@ export default function Dashboard() {
 
   return (
     <div className="min-h-screen bg-background flex">
-      {/* Sidebar */}
+      {/* Sidebar (desktop) / Mobile nav handled inside Sidebar */}
       <Sidebar activeTab={activeTab} onTabChange={setActiveTab} connected={connected} />
 
       {/* Main Content */}
-      <div className="flex-1 min-w-0">
+      {/* pt-14 on mobile = space for fixed top bar; pb-20 = space for bottom nav */}
+      <div className="flex-1 min-w-0 pt-14 md:pt-0 pb-20 md:pb-0">
         {/* Top Config Bar */}
         <ConfigPanel
           capital={data?.user_capital ?? 100000}

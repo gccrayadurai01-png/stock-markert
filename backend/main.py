@@ -210,15 +210,54 @@ async def broadcast(data: dict):
 
 # ── App Lifecycle ──────────────────────────────────────────────────────
 async def _market_hours_refresh_loop():
-    """Auto-refresh every 10 minutes ONLY during market hours (9:15 AM - 3:30 PM IST).
-    Calls Claude API for full analysis. Outside market hours, does nothing."""
+    """Auto-refresh every 10 minutes ONLY during market hours (9:15 AM - 3:30 PM IST)."""
     while True:
-        await asyncio.sleep(600)  # 10 minutes
+        await asyncio.sleep(600)
         if _is_market_open():
             logger.info("⏰ Market hours auto-refresh (10 min interval)...")
             await run_analysis()
         else:
             logger.debug("⏰ Outside market hours — skipping auto-refresh")
+
+
+async def _auto_trader_scheduler():
+    """
+    Auto-start Auto Trader at 9:15 AM IST, auto-stop at 3:30 PM IST.
+    Runs every day, Monday–Friday. No manual toggle needed.
+    """
+    global auto_trader
+    logger.info("📅 Auto Trader scheduler running — will start at 9:15 AM, stop at 3:30 PM IST")
+
+    while True:
+        now = datetime.now()
+        weekday = now.weekday()  # 0=Mon … 4=Fri, 5=Sat, 6=Sun
+
+        market_open  = now.replace(hour=9,  minute=15, second=0, microsecond=0)
+        market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
+
+        # ── OPEN: start auto trader at 9:15 AM on weekdays ──────────────
+        if weekday < 5 and now >= market_open and now < market_close:
+            if not auto_trader or not auto_trader.running:
+                logger.info("🔔 Market OPEN — Auto Trader starting automatically...")
+                cfg = load_auto_config()
+                cfg["enabled"] = True
+                save_auto_config(cfg)
+                auto_trader = AutoTrader(cfg)
+                asyncio.create_task(auto_trader.start())
+                # Also trigger a fresh analysis
+                asyncio.create_task(run_analysis())
+
+        # ── CLOSE: stop auto trader at 3:30 PM ──────────────────────────
+        elif auto_trader and auto_trader.running and (now >= market_close or weekday >= 5):
+            logger.info("🔔 Market CLOSED — Auto Trader stopping automatically...")
+            await auto_trader.stop()
+            auto_trader = None
+            cfg = load_auto_config()
+            cfg["enabled"] = False
+            save_auto_config(cfg)
+
+        # Sleep 60 seconds between checks
+        await asyncio.sleep(60)
 
 
 @asynccontextmanager
@@ -229,13 +268,21 @@ async def lifespan(app: FastAPI):
     # Start 10-min refresh loop (only active during market hours)
     asyncio.create_task(_market_hours_refresh_loop())
 
-    # Start auto trader if enabled
+    # Start auto trader scheduler (auto-start 9:15 AM, auto-stop 3:30 PM)
+    asyncio.create_task(_auto_trader_scheduler())
+
+    # Also immediately start if we're currently in market hours
     auto_cfg = load_auto_config()
-    if auto_cfg.get("enabled", False):
+    if _is_market_open():
+        logger.info("🔔 Server started during market hours — Auto Trader starting now...")
+        auto_cfg["enabled"] = True
+        save_auto_config(auto_cfg)
         auto_trader = AutoTrader(auto_cfg)
         asyncio.create_task(auto_trader.start())
+    else:
+        logger.info(f"📅 Market is CLOSED — Auto Trader will start automatically at 9:15 AM IST")
 
-    logger.info("🚀 Trading Command Center started (10-min market-hours refresh + manual)")
+    logger.info("🚀 Trading Command Center started (auto-schedule + 10-min refresh + manual)")
     yield
 
     if auto_trader:
