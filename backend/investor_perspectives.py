@@ -65,25 +65,25 @@ class RakeshJhunjhunwala(InvestorPerspective):
         # In a real system, we'd have P/E, ROE, revenue CAGR, etc.
 
         # Strong Buy Signal (RSI < 40, MACD bullish, volume spike)
-        if rsi < 40 and macd_vote > 0 and volume_spike:
+        if rsi < 40 and macd_vote == "BUY" and volume_spike:
             self.reasoning.append("Oversold (RSI<40) + MACD bullish crossover + volume spike — Strong conviction buy")
             self.signal = "STRONG_BUY"
             self.confidence = 85
 
         # Buy Signal
-        elif rsi < 50 and macd_vote > 0:
+        elif rsi < 50 and macd_vote == "BUY":
             self.reasoning.append("Approaching oversold territory with positive momentum")
             self.signal = "BUY"
             self.confidence = 70
 
         # Sell Signal (RSI > 60, MACD bearish)
-        elif rsi > 60 and macd_vote < 0:
+        elif rsi > 60 and macd_vote == "SELL":
             self.reasoning.append("Overbought (RSI>60) + MACD bearish divergence")
             self.signal = "SELL"
             self.confidence = 65
 
         # Strong Sell
-        elif rsi > 70 and macd_vote < 0:
+        elif rsi > 70 and macd_vote == "SELL":
             self.reasoning.append("Severely overbought (RSI>70) + momentum turning negative")
             self.signal = "STRONG_SELL"
             self.confidence = 80
@@ -126,7 +126,7 @@ class WarrenBuffett(InvestorPerspective):
         # Only buy quality at fair prices (middle Bollinger Band)
         # Avoid buying at extremes
 
-        if bb_pct < 0.2 and rsi > 30 and macd_vote > 0:
+        if bb_pct < 0.2 and rsi > 30 and macd_vote == "BUY":
             # Price near lower band, but not oversold panic
             self.reasoning.append("Quality pullback to fair value, moat likely intact")
             self.signal = "BUY"
@@ -182,24 +182,24 @@ class MichaelBurry(InvestorPerspective):
         # Burry hunts two extremes: severe shorts OR deep value
 
         # Deep value opportunity (extreme oversold + momentum turning)
-        if rsi < 30 and macd_vote > 0 and bb_pct < 0.1:
+        if rsi < 30 and macd_vote == "BUY" and bb_pct < 0.1:
             self.reasoning.append("Extreme capitulation setup — contrarian long with asymmetric upside")
             self.signal = "BUY"
             self.confidence = 85
 
         # Short opportunity (severe bubble, disconnected from fundamentals)
-        elif rsi > 75 and macd_vote < 0 and bb_pct > 0.9 and change_percent > 15:
+        elif rsi > 75 and macd_vote == "SELL" and bb_pct > 0.9 and change_percent > 15:
             self.reasoning.append("Classic bubble formation — spike on volume with no fundamental support")
             self.signal = "SHORT"
             self.confidence = 80
 
         # Moderate opportunities
-        elif rsi < 40 and macd_vote > 0:
+        elif rsi < 40 and macd_vote == "BUY":
             self.reasoning.append("Value setup forming — monitor for confirmation")
             self.signal = "BUY"
             self.confidence = 60
 
-        elif rsi > 65 and macd_vote < 0:
+        elif rsi > 65 and macd_vote == "SELL":
             self.reasoning.append("Weakness at resistance — short risk/reward favorable")
             self.signal = "SELL"
             self.confidence = 65
@@ -239,17 +239,17 @@ class CathieWood(InvestorPerspective):
 
         # Growth investors buy dips in high-quality growth stocks
 
-        if rsi < 50 and macd_vote > 0 and volume_spike:
+        if rsi < 50 and macd_vote == "BUY" and volume_spike:
             self.reasoning.append("Growth dip buy — strong conviction on disruptive theme")
             self.signal = "BUY"
             self.confidence = 80
 
-        elif rsi < 40 and macd_vote >= 0:
+        elif rsi < 40 and macd_vote in ("BUY", "NEUTRAL"):
             self.reasoning.append("Capitulation in quality growth — aggressive accumulation")
             self.signal = "BUY"
             self.confidence = 85
 
-        elif rsi > 70 and macd_vote < 0:
+        elif rsi > 70 and macd_vote == "SELL":
             self.reasoning.append("Extended move — take profits on strength, but believe in 5-10yr thesis")
             self.signal = "SELL"
             self.confidence = 55
@@ -289,7 +289,7 @@ class PeterLynch(InvestorPerspective):
 
         # Lynch: Buy boring stocks with strong signals when cheap
 
-        if rsi < 45 and macd_vote > 0 and score >= 30:
+        if rsi < 45 and macd_vote == "BUY" and score >= 30:
             self.reasoning.append("Setup: Boring stock, rising momentum, good technicals = 10-bagger potential")
             self.signal = "BUY"
             self.confidence = 75
@@ -299,7 +299,7 @@ class PeterLynch(InvestorPerspective):
             self.signal = "BUY"
             self.confidence = 80
 
-        elif rsi > 60 and macd_vote < 0:
+        elif rsi > 60 and macd_vote == "SELL":
             self.reasoning.append("Momentum breaking — sell into strength, hunt for next entry")
             self.signal = "SELL"
             self.confidence = 60

@@ -403,27 +403,40 @@ Respond ONLY with JSON: {{"confirmed": true/false, "reasoning": "one sentence wh
                 score += 15
                 reasons.append(f"Strong consensus: {buy_votes}/{total_votes} BUY")
             elif buy_votes >= 7:
-                score += 10
+                score += 12
                 reasons.append(f"Good consensus: {buy_votes}/{total_votes} BUY")
             elif buy_votes >= 6:
-                score += 5
+                score += 8
                 reasons.append(f"Moderate consensus: {buy_votes}/{total_votes} BUY")
+            elif buy_votes >= 5:
+                score += 5
+                reasons.append(f"Slight BUY lean: {buy_votes}/{total_votes} BUY")
+            elif buy_votes >= 4:
+                score += 3
+                reasons.append(f"Weak BUY lean: {buy_votes}/{total_votes} BUY")
             else:
-                missing.append(f"Weak consensus: {buy_votes}/{total_votes} BUY")
+                missing.append(f"No BUY consensus: {buy_votes}/{total_votes} BUY")
 
         # 3. RSI zone (max 10 pts)
         rsi = ind.get("rsi", {}).get("value", 50)
-        if 30 <= rsi <= 45:
+        if rsi < 30:
+            score += 8
+            reasons.append(f"RSI deeply oversold: {rsi:.0f} — strong bounce potential")
+        elif 30 <= rsi <= 45:
             score += 10
-            reasons.append(f"RSI in sweet spot (oversold bounce): {rsi:.0f}")
+            reasons.append(f"RSI sweet spot (oversold bounce): {rsi:.0f}")
         elif 45 < rsi <= 55:
-            score += 5
-            reasons.append(f"RSI neutral zone: {rsi:.0f}")
-        elif rsi < 30:
             score += 7
-            reasons.append(f"RSI deeply oversold: {rsi:.0f}")
+            reasons.append(f"RSI neutral accumulation zone: {rsi:.0f}")
+        elif 55 < rsi <= 65:
+            score += 4
+            reasons.append(f"RSI rising momentum: {rsi:.0f}")
+        elif 65 < rsi <= 75:
+            score += 1
+            missing.append(f"RSI elevated ({rsi:.0f}) — momentum may slow")
         else:
-            missing.append(f"RSI too high: {rsi:.0f}")
+            score -= 3
+            missing.append(f"RSI overbought: {rsi:.0f} — high reversal risk")
 
         # 4. Supertrend + EMA alignment (max 10 pts)
         supertrend = ind.get("supertrend", {}).get("direction", "")

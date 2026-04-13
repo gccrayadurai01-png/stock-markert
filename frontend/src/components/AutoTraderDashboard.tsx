@@ -515,71 +515,110 @@ function JournalTab({
 function SettingsTab({ onSave }: { onSave: () => void }) {
   const [config, setConfig] = useState<Record<string, number | boolean | string>>({});
   const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    setLoading(true);
     fetch(`${API}/api/auto-trader/config`)
       .then((r) => r.json())
-      .then(setConfig)
-      .catch(() => {});
+      .then((d) => { setConfig(d); setLoading(false); })
+      .catch(() => setLoading(false));
   }, []);
 
   async function save() {
     setSaving(true);
-    await fetch(`${API}/api/auto-trader/config`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(config),
-    });
+    setSaved(false);
+    try {
+      await fetch(`${API}/api/auto-trader/config`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(config),
+      });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 3000);
+      onSave();
+    } catch { /* ignore */ }
     setSaving(false);
-    onSave();
   }
 
-  return (
-    <div className="bg-card rounded-xl border border-border p-6 space-y-4">
-      <h3 className="text-sm font-black text-foreground uppercase">Auto Trader Configuration</h3>
+  if (loading) return <div className="text-center text-muted py-8 text-sm">Loading config...</div>;
 
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-        <SettingInput label="Capital (₹)" value={config.capital} type="number"
-          onChange={(v) => setConfig({ ...config, capital: Number(v) })} />
-        <SettingInput label="Max Positions" value={config.max_positions} type="number"
-          onChange={(v) => setConfig({ ...config, max_positions: Number(v) })} />
-        <SettingInput label="Risk Per Trade (%)" value={config.risk_per_trade} type="number"
-          onChange={(v) => setConfig({ ...config, risk_per_trade: Number(v) })} />
-        <SettingInput label="Max Portfolio Heat (%)" value={config.max_portfolio_heat} type="number"
-          onChange={(v) => setConfig({ ...config, max_portfolio_heat: Number(v) })} />
-        <SettingInput label="Min Confluence (0-100)" value={config.min_confluence} type="number"
-          onChange={(v) => setConfig({ ...config, min_confluence: Number(v) })} />
-        <SettingInput label="Scan Interval (sec)" value={config.scan_interval_seconds} type="number"
-          onChange={(v) => setConfig({ ...config, scan_interval_seconds: Number(v) })} />
+  return (
+    <div className="bg-card rounded-xl border border-border p-6 space-y-5">
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-black text-foreground uppercase">Auto Trader Configuration</h3>
+        {saved && <span className="text-xs text-green font-bold">✅ Saved!</span>}
       </div>
 
-      <div className="flex items-center gap-3 flex-wrap">
-        <label className="flex items-center gap-2 text-xs text-foreground">
+      <div className="space-y-1">
+        <div className="text-[10px] font-bold text-accent uppercase">Capital & Risk</div>
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+          <SettingInput label="Capital (₹)" value={config.capital} type="number"
+            onChange={(v) => setConfig({ ...config, capital: Number(v) })} />
+          <SettingInput label="Risk Per Trade (%)" value={config.risk_per_trade} type="number"
+            onChange={(v) => setConfig({ ...config, risk_per_trade: Number(v) })} />
+          <SettingInput label="Max Portfolio Heat (%)" value={config.max_portfolio_heat} type="number"
+            onChange={(v) => setConfig({ ...config, max_portfolio_heat: Number(v) })} />
+        </div>
+      </div>
+
+      <div className="space-y-1">
+        <div className="text-[10px] font-bold text-accent uppercase">Trade Rules</div>
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+          <SettingInput label="Max Positions" value={config.max_positions} type="number"
+            onChange={(v) => setConfig({ ...config, max_positions: Number(v) })} />
+          <SettingInput label="Min Confluence (0-110)" value={config.min_confluence} type="number"
+            onChange={(v) => setConfig({ ...config, min_confluence: Number(v) })} />
+          <SettingInput label="Scan Interval (sec)" value={config.scan_interval_seconds} type="number"
+            onChange={(v) => setConfig({ ...config, scan_interval_seconds: Number(v) })} />
+        </div>
+      </div>
+
+      <div className="space-y-1">
+        <div className="text-[10px] font-bold text-accent uppercase">Timing</div>
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+          <SettingInput label="No New Trades After (HH:MM)" value={config.no_new_trades_after} type="text"
+            onChange={(v) => setConfig({ ...config, no_new_trades_after: v })} />
+          <SettingInput label="Close Positions At (HH:MM)" value={config.close_positions_time} type="text"
+            onChange={(v) => setConfig({ ...config, close_positions_time: v })} />
+          <SettingInput label="Trailing SL Multiplier (ATR)" value={config.trailing_sl_atr_multiplier} type="number"
+            onChange={(v) => setConfig({ ...config, trailing_sl_atr_multiplier: Number(v) })} />
+        </div>
+      </div>
+
+      <div className="flex items-center gap-4 flex-wrap">
+        <label className="flex items-center gap-2 text-xs text-foreground cursor-pointer">
           <input
             type="checkbox"
             checked={!!config.test_mode}
             onChange={(e) => setConfig({ ...config, test_mode: e.target.checked })}
-            className="rounded"
+            className="w-4 h-4 rounded accent-green"
           />
-          Test Mode (paper trading only)
+          Paper Trading Mode
         </label>
-        <label className="flex items-center gap-2 text-xs text-foreground">
+        <label className="flex items-center gap-2 text-xs text-foreground cursor-pointer">
           <input
             type="checkbox"
             checked={config.use_ai_confirmation !== false}
             onChange={(e) => setConfig({ ...config, use_ai_confirmation: e.target.checked })}
-            className="rounded"
+            className="w-4 h-4 rounded accent-yellow"
           />
-          🧠 AI Confirmation (Claude reviews 85+ trades)
+          🧠 Claude AI Confirmation (for 85+ confluence trades)
         </label>
+      </div>
+
+      <div className="bg-yellow/10 border border-yellow/30 rounded-lg p-3 text-xs text-yellow">
+        <strong>Tip:</strong> Lower Min Confluence (30-45) to see more trades. Set 75+ for strict/real trading.
+        No New Trades After controls the cutoff time (e.g. 15:00 = 3 PM).
       </div>
 
       <button
         onClick={save}
         disabled={saving}
-        className="bg-accent hover:bg-accent/80 text-white text-xs font-bold px-4 py-2 rounded-lg"
+        className="bg-green hover:bg-green/80 text-white text-sm font-black px-6 py-3 rounded-xl shadow-lg shadow-green/20 transition-all"
       >
-        {saving ? "Saving..." : "Save Settings"}
+        {saving ? "Saving..." : "💾 Save Configuration"}
       </button>
     </div>
   );

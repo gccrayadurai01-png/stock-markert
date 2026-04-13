@@ -36,13 +36,14 @@ DEFAULT_CONFIG = {
     "max_positions": 5,
     "risk_per_trade": 1.5,
     "max_portfolio_heat": 8.0,
-    "min_confluence": 75,
+    "min_confluence": 60,
     "trailing_sl_atr_multiplier": 1.5,
     "scan_interval_seconds": 150,  # 2.5 minutes
     "test_mode": True,
     "test_mode_start": None,
     "close_positions_time": "15:15",
-    "no_new_trades_after": "14:30",
+    "no_new_trades_after": "15:00",
+    "use_ai_confirmation": True,
 }
 
 
