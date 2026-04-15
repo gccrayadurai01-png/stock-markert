@@ -30,13 +30,15 @@ from concurrent.futures import ThreadPoolExecutor
 
 from market_engine import fetch_all_stocks
 from investor_perspectives import analyze_through_investor_lenses
-from news_engine import get_market_news, classify_sentiment, match_stocks_in_headline, get_overall_sentiment
+from news_engine import get_market_news, classify_sentiment, match_stocks_in_headline, get_overall_sentiment, fetch_fii_dii_data
 from auto_store import (
     load_auto_config, get_portfolio, add_position, close_position,
     update_trailing_stop, update_position_prices, get_open_positions,
     log_trade_decision, save_scan_result, save_daily_summary,
     reset_daily_pnl, get_portfolio_stats,
+    get_strategy_performance, record_strategy_trade, log_strategy_trade_detail,
 )
+from smc_engine import analyze_smc
 
 logger = logging.getLogger(__name__)
 executor = ThreadPoolExecutor(max_workers=3)
@@ -89,7 +91,8 @@ class AutoTrader:
             self._task.cancel()
         # End of day: close all positions and save summary
         await self._force_close_all("End of day / Auto trader stopped")
-        save_daily_summary()
+        ai_summary = await self._generate_daily_summary()
+        save_daily_summary(ai_summary)
         logger.info("🤖 AUTO TRADER STOPPED — Master rests.")
 
     async def _scan_loop(self):
@@ -102,7 +105,8 @@ class AutoTrader:
                 elif self._is_after_close():
                     # Market closed — stop for the day
                     await self._force_close_all("Market closed — force exit")
-                    save_daily_summary()
+                    ai_summary = await self._generate_daily_summary()
+                    save_daily_summary(ai_summary)
                     logger.info("🤖 Market closed. Daily summary saved. Sleeping until tomorrow.")
                     self.running = False
                     break
@@ -145,64 +149,102 @@ class AutoTrader:
             # 5. Risk check — can we take new trades?
             risk = self._check_risk_limits()
 
-            # 6. Evaluate entries with FULL intelligence
+            # 6. Evaluate entries with MULTI-STRATEGY intelligence
             pending_signals = []
             entries_made = 0
+            active_strategies = self.config.get("active_strategies", ["A", "B", "C"])
+            strategy_mode = self.config.get("strategy_mode", "ALL_REQUIRED")
 
             if risk["can_trade"]:
                 for stock in all_stocks:
-                    result = self._evaluate_entry(stock)
-                    if result:
-                        if result["confluence"] >= self.config.get("min_confluence", 75):
-                            # HIGH CONFLUENCE — get Claude AI confirmation for 85+ trades
-                            ai_confirmed = True
-                            ai_reasoning = ""
-                            if result["confluence"] >= 85 and self._ai_client and self.config.get("use_ai_confirmation", True):
-                                ai_result = await self._get_ai_confirmation(stock, result)
-                                ai_confirmed = ai_result.get("confirmed", True)
-                                ai_reasoning = ai_result.get("reasoning", "")
-                                if not ai_confirmed:
-                                    logger.info(f"🤖🧠 AI REJECTED {stock['symbol']} — {ai_reasoning}")
-                                    result["reasons"].append(f"⚠️ AI rejected: {ai_reasoning}")
-                                    pending_signals.append({
-                                        "symbol": stock["symbol"],
-                                        "name": stock.get("name", ""),
-                                        "price": stock.get("price", 0),
-                                        "confluence_score": result["confluence"],
-                                        "missing": [f"AI rejected: {ai_reasoning}"],
-                                        "met_conditions": result.get("reasons", []),
-                                    })
-                                    continue
+                    result = await self._evaluate_entry_multi_strategy(stock, active_strategies)
+                    if not result:
+                        continue
 
-                            # EXECUTE PAPER TRADE
-                            trade = self._execute_entry(stock, result)
-                            if trade:
-                                entries_made += 1
-                                log_trade_decision({
-                                    "action": "ENTER",
+                    passes = self._check_strategy_gate(result, strategy_mode, active_strategies)
+                    confluence = result["confluence"]
+
+                    if passes and confluence >= self.config.get("min_confluence", 75):
+                        # ── AI RISK GATE via Orchestrator (replaces _get_ai_confirmation) ──
+                        # The orchestrator is called once per stock and CACHED.
+                        # For 85+ confluence trades, we use the orchestrator's riskAnalysis.approved
+                        # instead of a separate Claude call — saving one API round-trip per trade.
+                        ai_confirmed = True
+                        ai_reasoning = ""
+                        if confluence >= 85 and self.config.get("use_ai_confirmation", True):
+                            try:
+                                from ai_orchestrator import analyze_stock as _orch, is_trade_approved
+                                orch_result = _orch(
+                                    stock=stock,
+                                    all_news=self._cached_news,
+                                    market_sentiment=self._cached_sentiment.get("sentiment", "NEUTRAL"),
+                                    confluence=confluence,
+                                    reasons=result.get("reasons", []),
+                                    missing=result.get("missing", []),
+                                    capital=self.config.get("capital", 100_000),
+                                    risk_pct=self.config.get("risk_per_trade", 1.5),
+                                )
+                                ai_confirmed = is_trade_approved(orch_result)
+                                ai_reasoning = orch_result.get("riskAnalysis", {}).get("summary", "")
+                                cached_flag = "cache HIT" if orch_result.get("_cached") else "API call"
+                                logger.info(
+                                    f"🤖🧠 Orchestrator [{cached_flag}] {stock['symbol']}: "
+                                    f"{'✅ APPROVED' if ai_confirmed else '❌ REJECTED'} — {ai_reasoning}"
+                                )
+                            except Exception as e:
+                                logger.warning(f"Orchestrator gate failed for {stock['symbol']}: {e} — proceeding")
+                                ai_confirmed = True
+                                ai_reasoning = f"Orchestrator error: {e}"
+
+                            if not ai_confirmed:
+                                result["reasons"].append(f"⚠️ Orchestrator rejected: {ai_reasoning}")
+                                pending_signals.append({
                                     "symbol": stock["symbol"],
                                     "name": stock.get("name", ""),
-                                    "confluence_score": result["confluence"],
-                                    "entry_price": trade["entry_price"],
-                                    "stop_loss": trade["stop_loss"],
-                                    "target_1": trade["target_1"],
-                                    "shares": trade["shares"],
-                                    "reasoning": result["reasons"],
-                                    "ai_confirmation": ai_reasoning if ai_reasoning else "N/A",
-                                    "news_sentiment": result.get("news_sentiment", "N/A"),
-                                    "investor_consensus": result.get("investor_data", {}),
-                                    "indicator_snapshot": self._snapshot(stock),
+                                    "price": stock.get("price", 0),
+                                    "confluence_score": confluence,
+                                    "missing": [f"Risk gate rejected: {ai_reasoning}"],
+                                    "met_conditions": result.get("reasons", []),
+                                    "strategy_scores": result.get("strategy_scores", {}),
+                                    "strategies_confirmed": result.get("strategies_confirmed", []),
                                 })
-                        elif result["confluence"] >= 55:
-                            # Near threshold — add to watchlist
-                            pending_signals.append({
+                                continue
+
+                        # EXECUTE PAPER TRADE
+                        trade = self._execute_entry(stock, result)
+                        if trade:
+                            entries_made += 1
+                            strategy_key = "+".join(sorted(result.get("strategies_confirmed", active_strategies)))
+                            log_trade_decision({
+                                "action": "ENTER",
                                 "symbol": stock["symbol"],
                                 "name": stock.get("name", ""),
-                                "price": stock.get("price", 0),
-                                "confluence_score": result["confluence"],
-                                "missing": result.get("missing", []),
-                                "met_conditions": result.get("reasons", []),
+                                "confluence_score": confluence,
+                                "entry_price": trade["entry_price"],
+                                "stop_loss": trade["stop_loss"],
+                                "target_1": trade["target_1"],
+                                "shares": trade["shares"],
+                                "reasoning": result["reasons"],
+                                "ai_confirmation": ai_reasoning if ai_reasoning else "N/A",
+                                "news_sentiment": result.get("news_sentiment", "N/A"),
+                                "investor_consensus": result.get("investor_data", {}),
+                                "indicator_snapshot": self._snapshot(stock),
+                                "strategy_key": strategy_key,
+                                "strategy_scores": result.get("strategy_scores", {}),
+                                "strategies_confirmed": result.get("strategies_confirmed", []),
                             })
+                    elif confluence >= 45:
+                        # Near threshold — add to watchlist
+                        pending_signals.append({
+                            "symbol": stock["symbol"],
+                            "name": stock.get("name", ""),
+                            "price": stock.get("price", 0),
+                            "confluence_score": confluence,
+                            "missing": result.get("missing", []),
+                            "met_conditions": result.get("reasons", []),
+                            "strategy_scores": result.get("strategy_scores", {}),
+                            "strategies_confirmed": result.get("strategies_confirmed", []),
+                        })
 
             # 7. Save scan result
             elapsed = round(time.time() - start_time, 1)
@@ -360,6 +402,245 @@ Respond ONLY with JSON: {{"confirmed": true/false, "reasoning": "one sentence wh
         except Exception as e:
             logger.warning(f"🤖 AI confirmation failed: {e} — proceeding with trade")
             return {"confirmed": True, "reasoning": f"AI error: {e} — proceeding on indicators"}
+
+    # ── MULTI-STRATEGY FRAMEWORK ───────────────────────────────────────
+
+    async def _evaluate_entry_multi_strategy(self, stock: dict, active_strategies: list) -> Optional[dict]:
+        """
+        Evaluate a stock across all active strategies (A, B, C, D) independently.
+        Returns combined result with per-strategy scores and an overall confluence.
+        Strategy A = Technical Indicators
+        Strategy B = Investor Perspectives
+        Strategy C = News Sentiment
+        Strategy D = SMC / ICT
+        """
+        ind = stock.get("indicators", {})
+        if not ind:
+            return None
+        symbol = stock.get("symbol", "")
+
+        # Skip if already holding
+        for pos in get_open_positions():
+            if pos["symbol"] == symbol:
+                return None
+
+        strategy_scores = {}
+        strategies_confirmed = []
+        all_reasons = []
+        all_missing  = []
+
+        # ── Strategy A: Technical Indicators ──────────────────────────
+        if "A" in active_strategies:
+            a_score, a_reasons, a_missing = self._score_indicators(stock)
+            strategy_scores["A"] = a_score
+            all_reasons.extend(a_reasons)
+            all_missing.extend(a_missing)
+            if a_score >= 40:
+                strategies_confirmed.append("A")
+
+        # ── Strategy B: Investor Perspectives ──────────────────────────
+        if "B" in active_strategies:
+            b_score, b_reasons, b_missing, investor_data = self._score_investor_perspectives(stock, ind)
+            strategy_scores["B"] = b_score
+            all_reasons.extend(b_reasons)
+            all_missing.extend(b_missing)
+            if b_score >= 3:  # 3+ out of 5 investors bullish
+                strategies_confirmed.append("B")
+        else:
+            investor_data = {}
+
+        # ── Strategy C: News Sentiment ─────────────────────────────────
+        if "C" in active_strategies:
+            c_score, c_reasons, c_missing, news_sent = self._score_news(symbol)
+            strategy_scores["C"] = c_score
+            all_reasons.extend(c_reasons)
+            all_missing.extend(c_missing)
+            if c_score >= 5:
+                strategies_confirmed.append("C")
+        else:
+            news_sent = "N/A"
+
+        # ── Strategy D: SMC / ICT ──────────────────────────────────────
+        smc_data = {}
+        if "D" in active_strategies:
+            # Only run SMC on stocks that pass basic indicator check (saves API calls)
+            run_smc = True
+            if self.config.get("smc_on_top_candidates_only", True):
+                ind_score = strategy_scores.get("A", 0)
+                run_smc = ind_score >= 30 or "A" not in active_strategies
+
+            if run_smc:
+                try:
+                    loop = asyncio.get_event_loop()
+                    smc_data = await loop.run_in_executor(executor,
+                        lambda: analyze_smc(symbol, stock.get("price", 0)))
+                    d_score = smc_data.get("smc_score", 0)
+                    strategy_scores["D"] = d_score
+                    if smc_data.get("available"):
+                        all_reasons.extend([f"[SMC] {r}" for r in smc_data.get("reasons", [])])
+                        all_missing.extend([f"[SMC] {m}" for m in smc_data.get("missing", [])])
+                    if d_score >= self.config.get("smc_min_score", 60):
+                        strategies_confirmed.append("D")
+                except Exception as e:
+                    logger.warning(f"SMC analysis failed for {symbol}: {e}")
+                    strategy_scores["D"] = 0
+            else:
+                strategy_scores["D"] = 0
+
+        # ── Combined Confluence Score ──────────────────────────────────
+        # Weighted combination of active strategy scores (normalised 0–110)
+        weights = {"A": 0.40, "B": 0.25, "C": 0.20, "D": 0.15}
+        norm    = {"A": 110,  "B": 15,   "C": 10,   "D": 100}
+
+        total_weight = sum(weights[s] for s in active_strategies if s in weights)
+        weighted_sum = 0.0
+        for s in active_strategies:
+            if s in strategy_scores and s in weights and s in norm:
+                pct = min(1.0, strategy_scores[s] / norm[s])
+                weighted_sum += pct * weights[s]
+
+        confluence = int((weighted_sum / total_weight) * 110) if total_weight > 0 else 0
+        confluence = max(0, min(110, confluence))
+
+        return {
+            "confluence": confluence,
+            "reasons": all_reasons,
+            "missing": all_missing,
+            "strategy_scores": strategy_scores,
+            "strategies_confirmed": strategies_confirmed,
+            "news_sentiment": news_sent if "C" in active_strategies else "N/A",
+            "investor_data": investor_data,
+            "smc_data": smc_data,
+        }
+
+    def _check_strategy_gate(self, result: dict, mode: str, active_strategies: list) -> bool:
+        """
+        ALL_REQUIRED: Every active strategy must confirm (strategies_confirmed = active_strategies).
+        ANY_TRIGGERS: At least one active strategy confirms.
+        """
+        confirmed = set(result.get("strategies_confirmed", []))
+        active    = set(active_strategies)
+
+        if mode == "ALL_REQUIRED":
+            return active.issubset(confirmed)
+        else:  # ANY_TRIGGERS
+            return bool(confirmed & active)
+
+    def _score_indicators(self, stock: dict) -> tuple:
+        """Strategy A: Pure technical indicator score. Returns (score 0-110, reasons, missing)."""
+        ind = stock.get("indicators", {})
+        score = 0
+        reasons = []
+        missing = []
+
+        stock_score = stock.get("score", 0)
+        if stock_score >= 30:
+            score += 20; reasons.append(f"[A] Strong score: {stock_score}")
+        elif stock_score >= 20:
+            score += 12; reasons.append(f"[A] Good score: {stock_score}")
+        elif stock_score >= 10:
+            score += 5;  reasons.append(f"[A] Moderate score: {stock_score}")
+        else:
+            missing.append(f"[A] Weak indicator score: {stock_score}")
+
+        votes = stock.get("votes", {})
+        buy_votes = votes.get("BUY", 0)
+        total_votes = buy_votes + votes.get("SELL", 0) + votes.get("NEUTRAL", 0)
+        if total_votes > 0:
+            if buy_votes >= 8:   score += 15; reasons.append(f"[A] Strong consensus: {buy_votes}/{total_votes} BUY")
+            elif buy_votes >= 6: score += 8;  reasons.append(f"[A] Moderate consensus: {buy_votes}/{total_votes} BUY")
+            elif buy_votes >= 4: score += 3;  reasons.append(f"[A] Weak BUY lean: {buy_votes}/{total_votes}")
+            else:                missing.append(f"[A] No BUY consensus: {buy_votes}/{total_votes}")
+
+        rsi = ind.get("rsi", {}).get("value", 50)
+        if 30 <= rsi <= 45:   score += 10; reasons.append(f"[A] RSI sweet spot: {rsi:.0f}")
+        elif 45 < rsi <= 55:  score += 7;  reasons.append(f"[A] RSI neutral: {rsi:.0f}")
+        elif 55 < rsi <= 65:  score += 4;  reasons.append(f"[A] RSI rising: {rsi:.0f}")
+        elif rsi > 75:        score -= 3;  missing.append(f"[A] RSI overbought: {rsi:.0f}")
+        else:                              missing.append(f"[A] RSI: {rsi:.0f}")
+
+        supertrend = ind.get("supertrend", {}).get("direction", "")
+        ema_align  = ind.get("ema_crossover", {}).get("alignment", "")
+        if supertrend == "UP" and ema_align == "BULLISH":
+            score += 10; reasons.append("[A] Supertrend UP + EMA Bullish")
+        elif supertrend == "UP":
+            score += 5;  reasons.append("[A] Supertrend UP")
+        elif ema_align == "BULLISH":
+            score += 5;  reasons.append("[A] EMA Bullish")
+        else:
+            missing.append("[A] No trend alignment")
+
+        macd_vote = ind.get("macd", {}).get("vote", "")
+        adx_val   = ind.get("adx", {}).get("adx", 0)
+        if macd_vote == "BUY" and adx_val > 25:
+            score += 10; reasons.append(f"[A] MACD bullish + ADX {adx_val:.0f}")
+        elif macd_vote == "BUY":
+            score += 5;  reasons.append("[A] MACD bullish")
+        else:
+            missing.append(f"[A] No MACD/ADX confirmation")
+
+        vol_spike = ind.get("volume", {}).get("spike", False)
+        vol_ratio = ind.get("volume", {}).get("ratio", 1.0)
+        if vol_spike:      score += 10; reasons.append(f"[A] Volume spike ({vol_ratio:.1f}x)")
+        elif vol_ratio > 1.3: score += 5; reasons.append(f"[A] Above-avg volume ({vol_ratio:.1f}x)")
+        else:              missing.append(f"[A] Low volume: {vol_ratio:.1f}x")
+
+        bb_pct = ind.get("bollinger", {}).get("pct_b", 0.5)
+        if bb_pct < 0.2:   score += 3; reasons.append(f"[A] Near Bollinger lower band")
+        elif bb_pct > 0.8: score -= 5; missing.append(f"[A] Near Bollinger upper band — risky")
+
+        return max(0, min(110, score)), reasons, missing
+
+    def _score_investor_perspectives(self, stock: dict, ind: dict) -> tuple:
+        """Strategy B: Investor perspectives score. Returns (bullish_count 0-5, reasons, missing, data)."""
+        reasons = []
+        missing = []
+        investor_data = {}
+        try:
+            from investor_perspectives import analyze_through_investor_lenses
+            data = analyze_through_investor_lenses(stock, ind)
+            bullish = data.get("consensus", {}).get("bullish_count", 0)
+            investor_data = {
+                "bullish_count": bullish,
+                "key_insight": data.get("consensus", {}).get("key_insight", ""),
+                "perspectives": [
+                    {"investor": p["investor"], "signal": p["signal"]}
+                    for p in data.get("investor_perspectives", [])
+                ],
+            }
+            if bullish >= 4:   reasons.append(f"[B] Strong investor consensus: {bullish}/5 bullish")
+            elif bullish >= 3: reasons.append(f"[B] Good investor consensus: {bullish}/5 bullish")
+            elif bullish >= 2: reasons.append(f"[B] Mixed: {bullish}/5 bullish")
+            else:              missing.append(f"[B] Weak investor consensus: {bullish}/5 bullish")
+            return bullish, reasons, missing, investor_data
+        except Exception:
+            missing.append("[B] Could not compute investor perspectives")
+            return 0, reasons, missing, investor_data
+
+    def _score_news(self, symbol: str) -> tuple:
+        """Strategy C: News sentiment score. Returns (score 0-10, reasons, missing, sentiment)."""
+        reasons = []
+        missing = []
+        news_data = self._get_stock_news_sentiment(symbol)
+        news_sent = news_data.get("sentiment", "NEUTRAL")
+        is_specific = not news_data.get("market_level", True)
+
+        if is_specific:
+            if news_sent == "BULLISH":
+                headlines = news_data.get("headlines", [])
+                score = 10
+                reasons.append(f"[C] Bullish stock news ({news_data['bullish']} articles): {headlines[0][:55] if headlines else ''}")
+            elif news_sent == "BEARISH":
+                score = -10
+                missing.append(f"[C] Bearish stock news ({news_data['bearish']} articles)")
+            else:
+                score = 2; reasons.append("[C] Neutral stock news")
+        else:
+            if news_sent == "BULLISH":   score = 5;  reasons.append("[C] Bullish market sentiment")
+            elif news_sent == "BEARISH": score = -3; missing.append("[C] Bearish market sentiment")
+            else:                        score = 0
+
+        return score, reasons, missing, news_sent
 
     # ── ENTRY LOGIC ────────────────────────────────────────────────────
 
@@ -573,6 +854,7 @@ Respond ONLY with JSON: {{"confirmed": true/false, "reasoning": "one sentence wh
         if pos_info["shares"] <= 0:
             return None
 
+        strategy_key = "+".join(sorted(analysis.get("strategies_confirmed", [])))
         trade = {
             "symbol": stock["symbol"],
             "name": stock.get("name", stock["symbol"]),
@@ -589,6 +871,10 @@ Respond ONLY with JSON: {{"confirmed": true/false, "reasoning": "one sentence wh
             "entry_reasoning": analysis["reasons"],
             "atr": round(atr, 2),
             "current_price": price,
+            # Strategy attribution
+            "strategy_key": strategy_key,
+            "strategies_confirmed": analysis.get("strategies_confirmed", []),
+            "strategy_scores": analysis.get("strategy_scores", {}),
         }
 
         added = add_position(trade)
@@ -661,17 +947,26 @@ Respond ONLY with JSON: {{"confirmed": true/false, "reasoning": "one sentence wh
                     exit_reason = f"Circuit breaker: position down {pnl_pct:.1f}%"
 
             if exit_reason:
+                pnl = round((current - entry) * pos["shares"], 2)
                 close_position(sym, current, exit_reason, partial=partial)
                 log_trade_decision({
                     "action": "PARTIAL_EXIT" if partial else "EXIT",
                     "symbol": sym,
                     "exit_price": current,
                     "entry_price": entry,
-                    "pnl": round((current - entry) * pos["shares"], 2),
+                    "pnl": pnl,
                     "pnl_pct": round((current / entry - 1) * 100, 2),
                     "reasoning": [exit_reason],
                     "hold_duration_minutes": self._hold_minutes(pos.get("entry_time")),
+                    "strategy_key": pos.get("strategy_key", ""),
                 })
+                # Track strategy performance
+                strategy_key = pos.get("strategy_key", "")
+                if strategy_key:
+                    record_strategy_trade(strategy_key, pnl, pnl > 0)
+                    log_strategy_trade_detail(sym, strategy_key, pnl,
+                        pos.get("strategies_confirmed", []),
+                        pos.get("strategy_scores", {}))
                 logger.info(f"🤖🚪 EXIT: {sym} @ ₹{current:.0f} — {exit_reason}")
             else:
                 # Update trailing stop (move up, never down)
@@ -785,6 +1080,155 @@ Respond ONLY with JSON: {{"confirmed": true/false, "reasoning": "one sentence wh
             "risk_amount": round(risk_per_share * shares, 2),
         }
 
+    # ── DAILY SUMMARY GENERATION ────────────────────────────────────────
+
+    async def _generate_daily_summary(self) -> dict:
+        """Generate an AI-powered daily summary at end of day."""
+        from auto_store import get_trade_journal, get_scan_history, get_portfolio_stats
+        from datetime import date
+
+        today_str = date.today().isoformat()
+        portfolio = get_portfolio()
+        stats = get_portfolio_stats()
+        journal = get_trade_journal(200)
+        scans = get_scan_history(50)
+
+        today_journal = [j for j in journal if j.get("timestamp", "").startswith(today_str)]
+        today_scans = [s for s in scans if s.get("timestamp", "").startswith(today_str)]
+        trades_taken = [j for j in today_journal if j.get("action") == "ENTER"]
+        trades_exited = [j for j in today_journal if j.get("action") in ("EXIT", "PARTIAL_EXIT")]
+
+        # Fetch FII/DII data
+        fii_dii = {}
+        try:
+            fii_dii = await fetch_fii_dii_data()
+        except Exception as e:
+            logger.warning(f"FII/DII fetch failed for summary: {e}")
+
+        # Gather news headlines
+        news_headlines = [n.get("headline", "") for n in self._cached_news[:10]]
+        market_sentiment = self._cached_sentiment.get("sentiment", "N/A")
+
+        # Build base summary (without AI)
+        base_summary = {
+            "date": today_str,
+            "market_sentiment": market_sentiment,
+            "news_headlines": news_headlines[:5],
+            "fii_dii": fii_dii,
+            "total_scans": len(today_scans),
+            "trades_count": len(trades_taken),
+            "exits_count": len(trades_exited),
+            "today_pnl": portfolio.get("today_pnl", 0),
+        }
+
+        # Try AI-powered summary
+        if self._ai_client:
+            try:
+                fii_dii_text = ""
+                if fii_dii.get("available"):
+                    if fii_dii.get("headline"):
+                        fii_dii_text = f"FII/DII News: {fii_dii['headline']}"
+                    else:
+                        fii_dii_text = (
+                            f"FII: Buy ₹{fii_dii['fii_buy']:.0f}Cr, Sell ₹{fii_dii['fii_sell']:.0f}Cr, "
+                            f"Net ₹{fii_dii['fii_net']:.0f}Cr | "
+                            f"DII: Buy ₹{fii_dii['dii_buy']:.0f}Cr, Sell ₹{fii_dii['dii_sell']:.0f}Cr, "
+                            f"Net ₹{fii_dii['dii_net']:.0f}Cr"
+                        )
+
+                trade_details = ""
+                if trades_taken:
+                    for t in trades_taken:
+                        trade_details += f"\n  - {t.get('symbol', '?')}: Confluence {t.get('confluence_score', 0)}/110, Reasons: {', '.join(t.get('reasoning', [])[:3])}"
+                else:
+                    trade_details = "\n  No trades were taken today."
+
+                exit_details = ""
+                if trades_exited:
+                    for t in trades_exited:
+                        exit_details += f"\n  - {t.get('symbol', '?')}: P&L ₹{t.get('pnl', 0):.0f} ({t.get('pnl_pct', 0):.1f}%), Reason: {', '.join(t.get('reasoning', [])[:2])}"
+
+                prompt = f"""You are a daily market analyst for an auto-trading system. Generate a concise daily trading summary for {today_str}.
+
+TODAY'S DATA:
+- Total scans: {len(today_scans)}
+- Trades taken: {len(trades_taken)}
+- Trades exited: {len(trades_exited)}
+- Today P&L: ₹{portfolio.get('today_pnl', 0):.0f}
+- Market sentiment: {market_sentiment}
+
+TRADES:{trade_details}
+
+EXITS:{exit_details}
+
+TOP NEWS HEADLINES:
+{chr(10).join(f'- {h}' for h in news_headlines[:7])}
+
+FII/DII FLOWS:
+{fii_dii_text if fii_dii_text else 'Data not available'}
+
+PORTFOLIO: Capital ₹{portfolio.get('capital', 0):,.0f}, Cash ₹{portfolio.get('cash', 0):,.0f}
+
+Respond ONLY with JSON (no markdown):
+{{
+  "market_recap": "2-3 sentence market recap for today",
+  "why_trades": "Why trades were/weren't taken today (be specific about confluence scores, missing conditions)",
+  "strategies_analysis": "Which strategies worked/didn't work and why",
+  "big_news": ["top 3 impactful news items with 1-line analysis each"],
+  "fii_dii_analysis": "1-2 sentence analysis of FII/DII flows and their impact",
+  "tomorrow_outlook": "What to watch for tomorrow",
+  "risk_notes": "Any risk warnings or observations",
+  "grade": "A/B/C/D/F grade for today's trading performance"
+}}"""
+
+                loop = asyncio.get_event_loop()
+
+                def _call_ai():
+                    resp = self._ai_client.messages.create(
+                        model="claude-sonnet-4-20250514",
+                        max_tokens=800,
+                        messages=[{"role": "user", "content": prompt}],
+                    )
+                    text = resp.content[0].text.strip()
+                    if text.startswith("```"):
+                        text = text.split("```")[1]
+                        if text.startswith("json"):
+                            text = text[4:]
+                        text = text.strip()
+                    return json.loads(text)
+
+                ai_result = await loop.run_in_executor(executor, _call_ai)
+                base_summary["ai_analysis"] = ai_result
+                logger.info(f"🤖📊 AI daily summary generated: Grade {ai_result.get('grade', '?')}")
+
+            except Exception as e:
+                logger.warning(f"AI daily summary generation failed: {e}")
+                base_summary["ai_analysis"] = {
+                    "market_recap": f"Market sentiment was {market_sentiment}. {len(trades_taken)} trades taken, P&L: ₹{portfolio.get('today_pnl', 0):.0f}.",
+                    "why_trades": f"{'Trades taken based on confluence scoring.' if trades_taken else 'No stocks met the minimum confluence threshold today.'}",
+                    "strategies_analysis": "AI analysis unavailable — summary based on raw data.",
+                    "big_news": news_headlines[:3] if news_headlines else ["No major news captured today."],
+                    "fii_dii_analysis": fii_dii_text if fii_dii_text else "FII/DII data not available.",
+                    "tomorrow_outlook": "Review market conditions at open.",
+                    "risk_notes": "N/A",
+                    "grade": "N/A",
+                }
+        else:
+            # No AI client — build basic summary
+            base_summary["ai_analysis"] = {
+                "market_recap": f"Market sentiment: {market_sentiment}. Scans: {len(today_scans)}. Trades: {len(trades_taken)}. P&L: ₹{portfolio.get('today_pnl', 0):.0f}.",
+                "why_trades": f"{'Trades triggered by confluence scoring system.' if trades_taken else 'No stocks reached the minimum confluence threshold.'}",
+                "strategies_analysis": "Enable Claude AI for detailed strategy analysis.",
+                "big_news": news_headlines[:3] if news_headlines else ["No news data captured."],
+                "fii_dii_analysis": "Enable Claude AI for FII/DII analysis.",
+                "tomorrow_outlook": "Check pre-market data tomorrow.",
+                "risk_notes": "N/A",
+                "grade": "N/A",
+            }
+
+        base_summary["fii_dii"] = fii_dii
+        return base_summary
+
     # ── HELPERS ────────────────────────────────────────────────────────
 
     def _is_market_hours(self) -> bool:
@@ -871,5 +1315,11 @@ Respond ONLY with JSON: {{"confirmed": true/false, "reasoning": "one sentence wh
                 "ai_enabled": self._ai_client is not None and self.config.get("use_ai_confirmation", True),
                 "indicators_active": 12,
                 "investor_perspectives": 5,
+            },
+            # Multi-strategy status
+            "strategy_config": {
+                "active_strategies": self.config.get("active_strategies", ["A", "B", "C"]),
+                "strategy_mode": self.config.get("strategy_mode", "ALL_REQUIRED"),
+                "smc_min_score": self.config.get("smc_min_score", 60),
             },
         }

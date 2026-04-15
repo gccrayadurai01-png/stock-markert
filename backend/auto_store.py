@@ -16,6 +16,7 @@ JOURNAL_FILE = DATA_DIR / "trade_journal.json"
 SCAN_LOG_FILE = DATA_DIR / "scan_log.json"
 CONFIG_FILE = DATA_DIR / "config.json"
 DAILY_FILE = DATA_DIR / "daily_summary.json"
+STRATEGY_PERF_FILE = DATA_DIR / "strategy_performance.json"
 
 
 def _read(path: Path) -> Union[dict, list]:
@@ -44,6 +45,12 @@ DEFAULT_CONFIG = {
     "close_positions_time": "15:15",
     "no_new_trades_after": "15:00",
     "use_ai_confirmation": True,
+    # ── Multi-Strategy Settings ─────────────────────────────────────
+    # A = Technical Indicators, B = Investor Perspectives, C = News, D = SMC/ICT
+    "active_strategies": ["A", "B", "C"],   # Which strategies to use
+    "strategy_mode": "ALL_REQUIRED",         # ALL_REQUIRED or ANY_TRIGGERS
+    "smc_min_score": 60,                     # Min SMC score to count as bullish (D)
+    "smc_on_top_candidates_only": True,      # Only run SMC on indicator-positive stocks (saves API)
 }
 
 
@@ -75,6 +82,19 @@ def init_portfolio(capital: float) -> dict:
     }
     _write(PORTFOLIO_FILE, portfolio)
     return portfolio
+
+
+def update_portfolio_capital(new_capital: float):
+    """Update capital (and recalculate available cash) when config changes."""
+    p = get_portfolio()
+    deployed = sum(
+        pos.get("entry_price", 0) * pos.get("shares", 0)
+        for pos in p.get("positions", [])
+        if pos.get("status") in ("OPEN", "PARTIAL_EXIT")
+    )
+    p["capital"] = new_capital
+    p["cash"] = round(max(0, new_capital - deployed), 2)
+    _write(PORTFOLIO_FILE, p)
 
 
 def get_portfolio() -> dict:
@@ -246,21 +266,67 @@ def get_scan_history(last_n: int = 20) -> List[dict]:
 
 # ── Daily Summary ──────────────────────────────────────────────────────
 
-def save_daily_summary():
+def save_daily_summary(ai_summary: Optional[dict] = None):
+    """Save end-of-day summary. If ai_summary is provided, merge it in."""
     p = get_portfolio()
     stats = get_portfolio_stats()
+    journal = get_trade_journal(200)
+
+    # Count today's activity from journal
+    today_str = date.today().isoformat()
+    today_entries = [j for j in journal if j.get("timestamp", "").startswith(today_str)]
+    trades_taken = [j for j in today_entries if j.get("action") == "ENTER"]
+    trades_exited = [j for j in today_entries if j.get("action") in ("EXIT", "PARTIAL_EXIT")]
+    skips = [j for j in today_entries if j.get("action") == "SKIP"]
+
+    # Scan log analysis
+    scans = get_scan_history(50)
+    today_scans = [s for s in scans if s.get("timestamp", "").startswith(today_str)]
+
     summary = {
-        "date": date.today().isoformat(),
+        "date": today_str,
         "capital": p["capital"],
         "cash": p["cash"],
         "positions_held": len(p["positions"]),
         "today_pnl": p["today_pnl"],
         "total_pnl": p["total_pnl"],
         "stats": stats,
+        # Activity breakdown
+        "total_scans": len(today_scans),
+        "trades_taken": len(trades_taken),
+        "trades_exited": len(trades_exited),
+        "trades_skipped": len(skips),
+        "trade_details": [
+            {
+                "symbol": t.get("symbol", ""),
+                "action": t.get("action", ""),
+                "confluence_score": t.get("confluence_score", 0),
+                "entry_price": t.get("entry_price", 0),
+                "reasoning": t.get("reasoning", []),
+            }
+            for t in trades_taken
+        ],
+        "exit_details": [
+            {
+                "symbol": t.get("symbol", ""),
+                "pnl": t.get("pnl", 0),
+                "pnl_pct": t.get("pnl_pct", 0),
+                "reasoning": t.get("reasoning", []),
+            }
+            for t in trades_exited
+        ],
     }
+
+    # Merge AI-generated summary if provided
+    if ai_summary:
+        summary["ai_summary"] = ai_summary
+
     summaries = _read(DAILY_FILE)
     if not isinstance(summaries, list):
         summaries = []
+
+    # Replace existing summary for today if exists
+    summaries = [s for s in summaries if s.get("date") != today_str]
     summaries.append(summary)
     _write(DAILY_FILE, summaries[-90:])
 
@@ -272,8 +338,95 @@ def get_daily_summaries(last_n: int = 30) -> List[dict]:
     return summaries[-last_n:]
 
 
+def get_daily_summary_by_date(target_date: str) -> Optional[dict]:
+    """Get daily summary for a specific date (YYYY-MM-DD)."""
+    summaries = _read(DAILY_FILE)
+    if not isinstance(summaries, list):
+        return None
+    for s in summaries:
+        if s.get("date") == target_date:
+            return s
+    return None
+
+
 def reset_daily_pnl():
     """Call at start of each trading day."""
     p = get_portfolio()
     p["today_pnl"] = 0
     _write(PORTFOLIO_FILE, p)
+
+
+# ── Strategy Performance Tracking ─────────────────────────────────────
+
+_STRATEGY_EMPTY = lambda: {
+    "trades": 0, "wins": 0, "losses": 0,
+    "pnl": 0.0, "win_rate": 0.0,
+    "avg_win": 0.0, "avg_loss": 0.0,
+    "best_pnl": 0.0, "worst_pnl": 0.0,
+}
+
+
+def get_strategy_performance() -> dict:
+    """Get performance metrics per strategy and combination."""
+    data = _read(STRATEGY_PERF_FILE)
+    if not isinstance(data, dict):
+        return {}
+    return data
+
+
+def record_strategy_trade(strategy_key: str, pnl: float, is_win: bool):
+    """
+    Record a completed trade result for a strategy key.
+    strategy_key examples: "A", "B", "D", "A+C", "A+B+C+D"
+    """
+    data = get_strategy_performance()
+    if strategy_key not in data:
+        data[strategy_key] = _STRATEGY_EMPTY()
+
+    s = data[strategy_key]
+    s["trades"] += 1
+    s["pnl"] = round(s["pnl"] + pnl, 2)
+
+    if is_win:
+        s["wins"] += 1
+        if pnl > s["best_pnl"]:
+            s["best_pnl"] = round(pnl, 2)
+    else:
+        s["losses"] += 1
+        if pnl < s["worst_pnl"]:
+            s["worst_pnl"] = round(pnl, 2)
+
+    s["win_rate"] = round(s["wins"] / s["trades"] * 100, 1) if s["trades"] > 0 else 0.0
+
+    # Update avg win/loss
+    wins_total  = [t for t in data.get("_trade_log", []) if t.get("strategy") == strategy_key and t.get("pnl", 0) > 0]
+    losses_total = [t for t in data.get("_trade_log", []) if t.get("strategy") == strategy_key and t.get("pnl", 0) <= 0]
+    s["avg_win"]  = round(sum(t["pnl"] for t in wins_total)   / len(wins_total),  2) if wins_total  else 0.0
+    s["avg_loss"] = round(sum(t["pnl"] for t in losses_total) / len(losses_total), 2) if losses_total else 0.0
+
+    _write(STRATEGY_PERF_FILE, data)
+
+
+def log_strategy_trade_detail(symbol: str, strategy_key: str, pnl: float,
+                               strategies_confirmed: List[str], scores: dict):
+    """Append to trade log for avg win/loss calculation."""
+    data = _read(STRATEGY_PERF_FILE)
+    if not isinstance(data, dict):
+        data = {}
+    log = data.get("_trade_log", [])
+    log.append({
+        "symbol": symbol,
+        "strategy": strategy_key,
+        "pnl": round(pnl, 2),
+        "strategies_confirmed": strategies_confirmed,
+        "scores": scores,
+        "date": date.today().isoformat(),
+        "timestamp": datetime.now().isoformat(),
+    })
+    data["_trade_log"] = log[-500:]  # keep last 500
+    _write(STRATEGY_PERF_FILE, data)
+
+
+def reset_strategy_performance():
+    """Reset all strategy performance data."""
+    _write(STRATEGY_PERF_FILE, {})

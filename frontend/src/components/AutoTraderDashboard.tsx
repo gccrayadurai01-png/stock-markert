@@ -6,6 +6,11 @@ import type {
   AutoTraderPosition,
   AutoTraderPendingSignal,
   AutoTraderJournalEntry,
+  DailySummary,
+  StrategyPerformanceMap,
+  StrategyConfig,
+  StrategyId,
+  SMCAnalysis,
 } from "@/lib/types";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -17,7 +22,7 @@ interface Props {
 export default function AutoTraderDashboard({ initialData }: Props) {
   const [data, setData] = useState<AutoTraderData | null>(initialData ?? null);
   const [journal, setJournal] = useState<AutoTraderJournalEntry[]>([]);
-  const [tab, setTab] = useState<"positions" | "watchlist" | "journal" | "settings">("positions");
+  const [tab, setTab] = useState<"positions" | "watchlist" | "journal" | "strategies" | "summary" | "settings">("positions");
   const [loading, setLoading] = useState(false);
   const [toggling, setToggling] = useState(false);
   const [scanning, setScanning] = useState(false);
@@ -202,30 +207,34 @@ export default function AutoTraderDashboard({ initialData }: Props) {
       )}
 
       {/* Tabs */}
-      <div className="flex gap-1 border-b border-border pb-1">
-        {(["positions", "watchlist", "journal", "settings"] as const).map((t) => (
+      <div className="flex gap-1 border-b border-border pb-1 overflow-x-auto">
+        {(["positions", "watchlist", "journal", "strategies", "summary", "settings"] as const).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
-            className={`px-4 py-2 text-xs font-bold rounded-t-lg transition ${
+            className={`px-3 sm:px-4 py-2 text-xs font-bold rounded-t-lg transition whitespace-nowrap ${
               tab === t
                 ? "bg-accent/10 text-accent border-b-2 border-accent"
                 : "text-muted hover:text-foreground"
             }`}
           >
-            {t === "positions" && `📊 Positions (${positions.length})`}
-            {t === "watchlist" && `👁️ Watchlist (${pending.length})`}
-            {t === "journal" && "📝 Journal"}
-            {t === "settings" && "⚙️ Settings"}
+            {t === "positions"   && `📊 Positions (${positions.length})`}
+            {t === "watchlist"   && `👁️ Watchlist (${pending.length})`}
+            {t === "journal"     && "📝 Journal"}
+            {t === "strategies"  && "🧩 Strategies"}
+            {t === "summary"     && "📋 Daily Summary"}
+            {t === "settings"    && "⚙️ Settings"}
           </button>
         ))}
       </div>
 
       {/* Tab Content */}
-      {tab === "positions" && <PositionsTab positions={positions} />}
-      {tab === "watchlist" && <WatchlistTab signals={pending} />}
-      {tab === "journal" && <JournalTab entries={journal} onRefresh={fetchJournal} />}
-      {tab === "settings" && <SettingsTab onSave={fetchStatus} />}
+      {tab === "positions"   && <PositionsTab positions={positions} />}
+      {tab === "watchlist"   && <WatchlistTab signals={pending} />}
+      {tab === "journal"     && <JournalTab entries={journal} onRefresh={fetchJournal} />}
+      {tab === "strategies"  && <StrategiesTab initialConfig={data?.strategy_config} />}
+      {tab === "summary"     && <DailySummaryTab />}
+      {tab === "settings"    && <SettingsTab onSave={fetchStatus} />}
 
       {/* Last scan */}
       {data?.last_scan && (
@@ -500,6 +509,729 @@ function JournalTab({
   );
 }
 
+// ── Strategy Metadata ─────────────────────────────────────────────────
+
+const STRATEGY_META: Record<StrategyId, { label: string; desc: string; icon: string; color: string }> = {
+  A: { label: "Indicators", icon: "📊", color: "accent",  desc: "12 technical indicators — RSI, MACD, Supertrend, EMA, ADX, Volume, Bollinger, VWAP, OBV, ATR" },
+  B: { label: "Investors",  icon: "🏛️", color: "yellow",  desc: "5 legendary investor lenses — Jhunjhunwala, Buffett, Burry, Cathie Wood, Peter Lynch" },
+  C: { label: "News",       icon: "📰", color: "green",   desc: "Live news sentiment — stock-specific + market-level news scoring" },
+  D: { label: "SMC / ICT",  icon: "🎯", color: "purple",  desc: "Smart Money Concepts — Order Blocks, Fair Value Gaps, BOS/CHoCH, Liquidity, OTE zones" },
+};
+
+function StrategiesTab({ initialConfig }: { initialConfig?: StrategyConfig }) {
+  const [perf, setPerf] = useState<StrategyPerformanceMap>({});
+  const [config, setConfig] = useState<StrategyConfig>({
+    active_strategies: initialConfig?.active_strategies ?? ["A", "B", "C"],
+    strategy_mode: initialConfig?.strategy_mode ?? "ALL_REQUIRED",
+    smc_min_score: initialConfig?.smc_min_score ?? 60,
+  });
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [smcSymbol, setSmcSymbol] = useState("");
+  const [smcResult, setSmcResult] = useState<SMCAnalysis | null>(null);
+  const [smcLoading, setSmcLoading] = useState(false);
+
+  useEffect(() => {
+    fetch(`${API}/api/auto-trader/strategy-performance`)
+      .then(r => r.json())
+      .then(d => { if (d && typeof d === "object") setPerf(d); })
+      .catch(() => {});
+    // Refresh config from server
+    fetch(`${API}/api/auto-trader/config`)
+      .then(r => r.json())
+      .then(d => {
+        if (d.active_strategies) {
+          setConfig({
+            active_strategies: d.active_strategies,
+            strategy_mode: d.strategy_mode ?? "ALL_REQUIRED",
+            smc_min_score: d.smc_min_score ?? 60,
+          });
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  function toggleStrategy(id: StrategyId) {
+    const current = config.active_strategies;
+    const next = current.includes(id)
+      ? current.filter(s => s !== id)
+      : [...current, id] as StrategyId[];
+    setConfig({ ...config, active_strategies: next });
+  }
+
+  async function saveConfig() {
+    setSaving(true);
+    setSaved(false);
+    try {
+      await fetch(`${API}/api/auto-trader/strategy-config`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(config),
+      });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 3000);
+    } catch { /* ignore */ }
+    setSaving(false);
+  }
+
+  async function resetPerf() {
+    await fetch(`${API}/api/auto-trader/strategy-performance/reset`, { method: "POST" });
+    setPerf({});
+  }
+
+  async function runSMC() {
+    if (!smcSymbol.trim()) return;
+    setSmcLoading(true);
+    setSmcResult(null);
+    try {
+      const sym = smcSymbol.toUpperCase().includes(".NS") ? smcSymbol.toUpperCase() : `${smcSymbol.toUpperCase()}.NS`;
+      const res = await fetch(`${API}/api/auto-trader/smc-analyze/${encodeURIComponent(sym)}`, { method: "POST" });
+      const d = await res.json();
+      setSmcResult(d);
+    } catch { /* ignore */ }
+    setSmcLoading(false);
+  }
+
+  // Active strategy combinations that have data
+  const perfKeys = Object.keys(perf).filter(k => k !== "_trade_log");
+  const singleKeys = (["A", "B", "C", "D"] as StrategyId[]).filter(k => perf[k]);
+  const comboKeys = perfKeys.filter(k => k.includes("+") && perf[k]?.trades > 0);
+
+  return (
+    <div className="space-y-6">
+      {/* Strategy Cards — A B C D */}
+      <div>
+        <div className="flex items-center justify-between mb-3">
+          <span className="text-xs font-black text-foreground uppercase">4 Trading Strategies</span>
+          {saved && <span className="text-xs text-green font-bold animate-pulse">✅ Saved & Active!</span>}
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {(["A", "B", "C", "D"] as StrategyId[]).map((id) => {
+            const meta = STRATEGY_META[id];
+            const isActive = config.active_strategies.includes(id);
+            const p = perf[id];
+            const colorClass = {
+              accent: isActive ? "border-accent/60 bg-accent/5" : "border-border",
+              yellow: isActive ? "border-yellow/60 bg-yellow/5" : "border-border",
+              green:  isActive ? "border-green/60 bg-green/5"  : "border-border",
+              purple: isActive ? "border-purple-500/60 bg-purple-500/5" : "border-border",
+            }[meta.color];
+            const textColor = {
+              accent: "text-accent", yellow: "text-yellow",
+              green: "text-green",   purple: "text-purple-400",
+            }[meta.color];
+
+            return (
+              <div key={id} className={`rounded-xl border-2 p-4 transition-all ${colorClass}`}>
+                {/* Header */}
+                <div className="flex items-start justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-2xl">{meta.icon}</span>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className={`text-sm font-black ${textColor}`}>Strategy {id}</span>
+                        <span className="text-xs text-muted font-bold">— {meta.label}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => toggleStrategy(id)}
+                    className={`px-3 py-1 rounded-full text-[10px] font-black transition-all ${
+                      isActive
+                        ? "bg-green text-white shadow shadow-green/30"
+                        : "bg-muted/20 text-muted hover:bg-muted/40"
+                    }`}
+                  >
+                    {isActive ? "ACTIVE" : "OFF"}
+                  </button>
+                </div>
+
+                <p className="text-[10px] text-muted mb-3 leading-relaxed">{meta.desc}</p>
+
+                {/* Performance stats */}
+                {p && p.trades > 0 ? (
+                  <div className="grid grid-cols-4 gap-1.5 mt-2">
+                    <div className="bg-background rounded-lg p-1.5 text-center">
+                      <div className="text-[9px] text-muted">Trades</div>
+                      <div className="text-sm font-black text-foreground">{p.trades}</div>
+                    </div>
+                    <div className="bg-background rounded-lg p-1.5 text-center">
+                      <div className="text-[9px] text-muted">Win %</div>
+                      <div className={`text-sm font-black ${p.win_rate >= 50 ? "text-green" : "text-red"}`}>{p.win_rate}%</div>
+                    </div>
+                    <div className="bg-background rounded-lg p-1.5 text-center">
+                      <div className="text-[9px] text-muted">P&L</div>
+                      <div className={`text-sm font-black ${p.pnl >= 0 ? "text-green" : "text-red"}`}>₹{p.pnl >= 0 ? "+" : ""}{p.pnl.toLocaleString("en-IN")}</div>
+                    </div>
+                    <div className="bg-background rounded-lg p-1.5 text-center">
+                      <div className="text-[9px] text-muted">W/L</div>
+                      <div className="text-sm font-black text-foreground">{p.wins}/{p.losses}</div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-[10px] text-muted italic text-center py-1">No trades recorded yet</div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Strategy Mode + Save */}
+      <div className="bg-card rounded-xl border border-border p-4 space-y-4">
+        <div className="text-xs font-black text-foreground uppercase">Combination Mode</div>
+
+        <div className="grid grid-cols-2 gap-3">
+          {(["ALL_REQUIRED", "ANY_TRIGGERS"] as const).map((mode) => (
+            <button
+              key={mode}
+              onClick={() => setConfig({ ...config, strategy_mode: mode })}
+              className={`p-3 rounded-xl border-2 text-left transition-all ${
+                config.strategy_mode === mode
+                  ? "border-accent bg-accent/10"
+                  : "border-border bg-background hover:border-accent/50"
+              }`}
+            >
+              <div className="text-xs font-black text-foreground mb-1">
+                {mode === "ALL_REQUIRED" ? "🔒 ALL REQUIRED" : "⚡ ANY TRIGGERS"}
+              </div>
+              <div className="text-[10px] text-muted">
+                {mode === "ALL_REQUIRED"
+                  ? "All active strategies must agree (strictest — fewest, highest quality trades)"
+                  : "Any active strategy can trigger (more trades, test each independently)"}
+              </div>
+            </button>
+          ))}
+        </div>
+
+        {/* Active combo preview */}
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-[10px] text-muted">Active combination:</span>
+          {config.active_strategies.length === 0 ? (
+            <span className="text-[10px] text-red font-bold">No strategies selected</span>
+          ) : (
+            <span className="text-[10px] font-black text-accent">
+              {config.active_strategies.sort().join(" + ")}
+              {" "}({config.strategy_mode === "ALL_REQUIRED" ? "all must agree" : "any triggers"})
+            </span>
+          )}
+        </div>
+
+        {/* SMC min score (only when D is active) */}
+        {config.active_strategies.includes("D") && (
+          <div>
+            <label className="text-[10px] text-muted font-bold uppercase block mb-1">
+              SMC Min Score (D strategy threshold, 0–100)
+            </label>
+            <input
+              type="number"
+              min={0} max={100}
+              value={config.smc_min_score}
+              onChange={e => setConfig({ ...config, smc_min_score: Number(e.target.value) })}
+              className="w-32 bg-background text-foreground text-xs px-3 py-2 rounded border border-border focus:border-accent outline-none"
+            />
+            <span className="text-[10px] text-muted ml-2">
+              {config.smc_min_score >= 70 ? "Strict (best OB+FVG+Structure)" : config.smc_min_score >= 50 ? "Moderate" : "Relaxed"}
+            </span>
+          </div>
+        )}
+
+        <div className="flex items-center gap-3">
+          <button
+            onClick={saveConfig}
+            disabled={saving || config.active_strategies.length === 0}
+            className="bg-green hover:bg-green/80 text-white text-xs font-black px-5 py-2.5 rounded-xl shadow-lg shadow-green/20 transition-all disabled:opacity-50"
+          >
+            {saving ? "Saving..." : "💾 Apply Strategy Config"}
+          </button>
+          <button
+            onClick={resetPerf}
+            className="text-xs text-muted hover:text-red border border-border hover:border-red/50 px-4 py-2.5 rounded-xl transition-all"
+          >
+            🔄 Reset Performance Data
+          </button>
+        </div>
+      </div>
+
+      {/* Combination Performance */}
+      {comboKeys.length > 0 && (
+        <div className="bg-card rounded-xl border border-border p-4">
+          <div className="text-xs font-black text-foreground uppercase mb-3">Combination Performance</div>
+          <div className="space-y-2">
+            {comboKeys
+              .sort((a, b) => (perf[b]?.win_rate ?? 0) - (perf[a]?.win_rate ?? 0))
+              .map(key => {
+                const p = perf[key];
+                return (
+                  <div key={key} className="flex items-center justify-between bg-background rounded-lg px-3 py-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-black text-accent">{key}</span>
+                      <span className="text-[9px] text-muted">{p.trades} trades</span>
+                    </div>
+                    <div className="flex items-center gap-4 text-xs">
+                      <span className={`font-bold ${p.win_rate >= 50 ? "text-green" : "text-red"}`}>{p.win_rate}% WR</span>
+                      <span className={`font-bold ${p.pnl >= 0 ? "text-green" : "text-red"}`}>₹{p.pnl.toLocaleString("en-IN")}</span>
+                    </div>
+                  </div>
+                );
+              })}
+          </div>
+        </div>
+      )}
+
+      {/* SMC On-Demand Scanner */}
+      <div className="bg-card rounded-xl border border-purple-500/30 p-4">
+        <div className="flex items-center gap-2 mb-3">
+          <span>🎯</span>
+          <span className="text-xs font-black text-purple-400 uppercase">SMC / ICT Live Analysis</span>
+        </div>
+        <div className="flex items-center gap-2 mb-4">
+          <input
+            type="text"
+            placeholder="RELIANCE, TATAMOTORS, HDFCBANK..."
+            value={smcSymbol}
+            onChange={e => setSmcSymbol(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && runSMC()}
+            className="flex-1 bg-background text-foreground text-xs px-3 py-2 rounded-lg border border-border focus:border-purple-500 outline-none"
+          />
+          <button
+            onClick={runSMC}
+            disabled={smcLoading || !smcSymbol.trim()}
+            className="px-4 py-2 rounded-lg text-xs font-black bg-purple-500 hover:bg-purple-500/80 text-white transition-all disabled:opacity-50"
+          >
+            {smcLoading ? "Analyzing..." : "Analyze"}
+          </button>
+        </div>
+
+        {smcResult && (
+          <SMCResultCard result={smcResult} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SMCResultCard({ result }: { result: SMCAnalysis }) {
+  if (!result.available) {
+    return (
+      <div className="text-center text-muted py-4 text-xs">
+        {result.reasons?.[0] ?? "SMC data not available"}
+      </div>
+    );
+  }
+
+  const score = result.smc_score;
+  const signal = result.signal;
+  const pd = result.premium_discount;
+  const structure = result.structure;
+
+  return (
+    <div className="space-y-3">
+      {/* Score bar */}
+      <div className="flex items-center justify-between mb-1">
+        <span className="text-xs font-black text-foreground">{result.symbol.replace(".NS", "")} — SMC Score</span>
+        <span className={`text-lg font-black ${score >= 65 ? "text-green" : score >= 45 ? "text-yellow" : "text-red"}`}>
+          {score}/100
+        </span>
+      </div>
+      <div className="w-full h-2.5 bg-background rounded-full overflow-hidden">
+        <div
+          className={`h-full rounded-full transition-all ${score >= 65 ? "bg-green" : score >= 45 ? "bg-yellow" : "bg-red"}`}
+          style={{ width: `${score}%` }}
+        />
+      </div>
+
+      {/* Signal + structure */}
+      <div className="grid grid-cols-3 gap-2 text-xs">
+        <div className="bg-background rounded-lg p-2 text-center">
+          <div className="text-[9px] text-muted">Signal</div>
+          <div className={`font-black text-sm ${signal === "BULLISH" ? "text-green" : signal === "BEARISH" ? "text-red" : "text-muted"}`}>{signal}</div>
+        </div>
+        <div className="bg-background rounded-lg p-2 text-center">
+          <div className="text-[9px] text-muted">Structure</div>
+          <div className={`font-black text-sm ${structure?.trend === "BULLISH" ? "text-green" : structure?.trend === "BEARISH" ? "text-red" : "text-muted"}`}>
+            {structure?.trend ?? "N/A"}
+          </div>
+        </div>
+        <div className="bg-background rounded-lg p-2 text-center">
+          <div className="text-[9px] text-muted">Zone</div>
+          <div className={`font-black text-sm ${pd?.zone === "DISCOUNT" ? "text-green" : pd?.zone === "PREMIUM" ? "text-red" : "text-muted"}`}>
+            {pd ? `${pd.zone} ${pd.pct.toFixed(0)}%` : "N/A"}
+          </div>
+        </div>
+      </div>
+
+      {/* OBs */}
+      {result.order_blocks && result.order_blocks.length > 0 && (
+        <div className="bg-background rounded-lg p-3">
+          <div className="text-[10px] font-bold text-foreground uppercase mb-1.5">Order Blocks</div>
+          {result.order_blocks.map((ob, i) => (
+            <div key={i} className="flex items-center justify-between text-[10px] mb-1">
+              <span className={`font-bold ${ob.type === "BULLISH" ? "text-green" : "text-red"}`}>
+                {ob.type === "BULLISH" ? "🟩" : "🟥"} {ob.type} OB
+                {ob.touched ? " 🎯 IN ZONE" : ""}
+              </span>
+              <span className="text-muted">₹{ob.low.toLocaleString("en-IN")} – ₹{ob.high.toLocaleString("en-IN")}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* FVGs */}
+      {result.fair_value_gaps && result.fair_value_gaps.length > 0 && (
+        <div className="bg-background rounded-lg p-3">
+          <div className="text-[10px] font-bold text-foreground uppercase mb-1.5">Fair Value Gaps</div>
+          {result.fair_value_gaps.map((fvg, i) => (
+            <div key={i} className="flex items-center justify-between text-[10px] mb-1">
+              <span className={`font-bold ${fvg.type === "BULLISH" ? "text-green" : "text-red"}`}>
+                ⬜ {fvg.type} FVG (₹{fvg.size.toLocaleString("en-IN")} gap)
+              </span>
+              <span className="text-muted">₹{fvg.low.toLocaleString("en-IN")} – ₹{fvg.high.toLocaleString("en-IN")}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Structure event */}
+      {structure?.last_event && (
+        <div className={`rounded-lg p-2 text-[10px] font-bold ${
+          structure.last_event.direction === "BULLISH" ? "bg-green/10 text-green" : "bg-red/10 text-red"
+        }`}>
+          {structure.last_event.type}: {structure.last_event.label}
+        </div>
+      )}
+
+      {/* Reasons */}
+      <div className="space-y-1">
+        {result.reasons.map((r, i) => (
+          <div key={i} className="flex items-start gap-1.5 text-[10px] text-foreground/80">
+            <span className="text-green mt-0.5">✓</span><span>{r}</span>
+          </div>
+        ))}
+        {result.missing.slice(0, 3).map((m, i) => (
+          <div key={i} className="flex items-start gap-1.5 text-[10px] text-muted">
+            <span className="text-red mt-0.5">✕</span><span>{m}</span>
+          </div>
+        ))}
+      </div>
+
+      <div className="text-[9px] text-muted text-right">{result.candles_used} × {result.interval} candles analysed</div>
+    </div>
+  );
+}
+
+function DailySummaryTab() {
+  const [summaries, setSummaries] = useState<DailySummary[]>([]);
+  const [selectedDate, setSelectedDate] = useState<string>("");
+  const [selected, setSelected] = useState<DailySummary | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [generating, setGenerating] = useState(false);
+
+  useEffect(() => {
+    fetchSummaries();
+  }, []);
+
+  async function fetchSummaries() {
+    setLoading(true);
+    try {
+      const res = await fetch(`${API}/api/auto-trader/daily-summaries?last_n=60`);
+      const data = await res.json();
+      if (Array.isArray(data)) {
+        // Deduplicate by date (keep latest entry per date)
+        const byDate = new Map<string, DailySummary>();
+        for (const s of data) {
+          byDate.set(s.date, s);
+        }
+        const sorted = [...byDate.values()].sort((a, b) => b.date.localeCompare(a.date));
+        setSummaries(sorted);
+        if (sorted.length > 0) {
+          setSelectedDate(sorted[0].date);
+          setSelected(sorted[0]);
+        }
+      }
+    } catch { /* ignore */ }
+    setLoading(false);
+  }
+
+  function handleDateChange(date: string) {
+    setSelectedDate(date);
+    const found = summaries.find((s) => s.date === date);
+    setSelected(found ?? null);
+  }
+
+  async function generateNow() {
+    setGenerating(true);
+    try {
+      await fetch(`${API}/api/auto-trader/generate-summary`, { method: "POST" });
+      await fetchSummaries();
+    } catch { /* ignore */ }
+    setGenerating(false);
+  }
+
+  function downloadCSV() {
+    if (!selectedDate) return;
+    window.open(`${API}/api/auto-trader/daily-summary/${selectedDate}/download`, "_blank");
+  }
+
+  if (loading) return <div className="text-center text-muted py-8 text-sm">Loading summaries...</div>;
+
+  // Get AI analysis from either nested or flat structure
+  const ai = selected?.ai_summary?.ai_analysis ?? selected?.ai_analysis;
+  const fiiDii = selected?.ai_summary?.fii_dii ?? selected?.fii_dii;
+  const newsHeadlines = selected?.ai_summary?.news_headlines ?? [];
+
+  return (
+    <div className="space-y-4">
+      {/* Controls Bar */}
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
+          <select
+            value={selectedDate}
+            onChange={(e) => handleDateChange(e.target.value)}
+            className="bg-background text-foreground text-xs px-3 py-2 rounded-lg border border-border focus:border-accent outline-none"
+          >
+            {/* Deduplicate dates for the dropdown */}
+            {[...new Map(summaries.map((s) => [s.date, s])).values()].map((s) => (
+              <option key={s.date} value={s.date}>{s.date}</option>
+            ))}
+            {summaries.length === 0 && <option value="">No summaries yet</option>}
+          </select>
+          <span className="text-[10px] text-muted">{summaries.length} days available</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={generateNow}
+            disabled={generating}
+            className="px-3 py-2 rounded-lg text-xs font-bold bg-accent hover:bg-accent/80 text-white transition-all"
+          >
+            {generating ? "Generating..." : "🧠 Generate Today's Summary"}
+          </button>
+          <button
+            onClick={downloadCSV}
+            disabled={!selectedDate}
+            className="px-3 py-2 rounded-lg text-xs font-bold bg-card border border-border text-foreground hover:border-accent transition-all"
+          >
+            📥 Download CSV
+          </button>
+        </div>
+      </div>
+
+      {!selected ? (
+        <div className="bg-card rounded-xl border border-border p-8 text-center">
+          <span className="text-3xl block mb-2">📋</span>
+          <p className="text-sm font-bold text-muted">No daily summary available</p>
+          <p className="text-xs text-muted mt-1">Summaries are auto-generated at market close, or click "Generate" above</p>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {/* Grade + P&L Header */}
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+            {ai?.grade && ai.grade !== "N/A" && (
+              <div className={`rounded-xl border-2 p-3 text-center ${
+                ai.grade === "A" ? "border-green/50 bg-green/10" :
+                ai.grade === "B" ? "border-yellow/50 bg-yellow/10" :
+                ai.grade === "C" ? "border-accent/50 bg-accent/10" :
+                "border-red/50 bg-red/10"
+              }`}>
+                <div className="text-[9px] text-muted uppercase font-bold">Grade</div>
+                <div className={`text-3xl font-black ${
+                  ai.grade === "A" ? "text-green" :
+                  ai.grade === "B" ? "text-yellow" :
+                  ai.grade === "C" ? "text-accent" : "text-red"
+                }`}>{ai.grade}</div>
+              </div>
+            )}
+            <div className="bg-card rounded-xl border border-border p-3 text-center">
+              <div className="text-[9px] text-muted uppercase font-bold">P&L</div>
+              <div className={`text-lg font-black ${(selected.today_pnl ?? 0) >= 0 ? "text-green" : "text-red"}`}>
+                ₹{(selected.today_pnl ?? 0).toLocaleString("en-IN")}
+              </div>
+            </div>
+            <div className="bg-card rounded-xl border border-border p-3 text-center">
+              <div className="text-[9px] text-muted uppercase font-bold">Trades</div>
+              <div className="text-lg font-black text-foreground">{selected.trades_taken ?? 0}</div>
+            </div>
+            <div className="bg-card rounded-xl border border-border p-3 text-center">
+              <div className="text-[9px] text-muted uppercase font-bold">Scans</div>
+              <div className="text-lg font-black text-accent">{selected.total_scans ?? 0}</div>
+            </div>
+            <div className="bg-card rounded-xl border border-border p-3 text-center">
+              <div className="text-[9px] text-muted uppercase font-bold">Exits</div>
+              <div className="text-lg font-black text-foreground">{selected.trades_exited ?? 0}</div>
+            </div>
+          </div>
+
+          {/* Market Recap */}
+          {ai?.market_recap && (
+            <SummaryCard icon="📊" title="Market Recap" content={ai.market_recap} />
+          )}
+
+          {/* Why Trades / No Trades */}
+          {ai?.why_trades && (
+            <SummaryCard icon="🎯" title="Why Trades Were / Weren't Taken" content={ai.why_trades}
+              accent={selected.trades_taken > 0 ? "green" : "yellow"} />
+          )}
+
+          {/* Strategy Analysis */}
+          {ai?.strategies_analysis && (
+            <SummaryCard icon="🧠" title="Strategy Analysis" content={ai.strategies_analysis} accent="accent" />
+          )}
+
+          {/* Big News */}
+          {ai?.big_news && ai.big_news.length > 0 && (
+            <div className="bg-card rounded-xl border border-border p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <span>📰</span>
+                <span className="text-xs font-black text-foreground uppercase">Big News</span>
+              </div>
+              <div className="space-y-2">
+                {ai.big_news.map((news, i) => (
+                  <div key={i} className="flex items-start gap-2 text-xs text-foreground/80">
+                    <span className="text-accent font-bold mt-0.5">{i + 1}.</span>
+                    <span>{news}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* FII/DII Flows */}
+          <div className="bg-card rounded-xl border border-border p-4">
+            <div className="flex items-center gap-2 mb-3">
+              <span>💰</span>
+              <span className="text-xs font-black text-foreground uppercase">FII / DII Flows</span>
+            </div>
+            {fiiDii?.available ? (
+              fiiDii.headline ? (
+                <p className="text-xs text-foreground/80">{fiiDii.headline}</p>
+              ) : (
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-2">
+                    <div className="text-[10px] font-bold text-accent uppercase">FII (Foreign)</div>
+                    <div className="grid grid-cols-3 gap-2 text-xs">
+                      <div className="text-center bg-background rounded-lg p-2">
+                        <div className="text-muted text-[9px]">Buy</div>
+                        <div className="font-bold text-green">₹{fiiDii.fii_buy?.toLocaleString("en-IN")}Cr</div>
+                      </div>
+                      <div className="text-center bg-background rounded-lg p-2">
+                        <div className="text-muted text-[9px]">Sell</div>
+                        <div className="font-bold text-red">₹{fiiDii.fii_sell?.toLocaleString("en-IN")}Cr</div>
+                      </div>
+                      <div className="text-center bg-background rounded-lg p-2">
+                        <div className="text-muted text-[9px]">Net</div>
+                        <div className={`font-bold ${(fiiDii.fii_net ?? 0) >= 0 ? "text-green" : "text-red"}`}>
+                          ₹{fiiDii.fii_net?.toLocaleString("en-IN")}Cr
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <div className="text-[10px] font-bold text-purple-400 uppercase">DII (Domestic)</div>
+                    <div className="grid grid-cols-3 gap-2 text-xs">
+                      <div className="text-center bg-background rounded-lg p-2">
+                        <div className="text-muted text-[9px]">Buy</div>
+                        <div className="font-bold text-green">₹{fiiDii.dii_buy?.toLocaleString("en-IN")}Cr</div>
+                      </div>
+                      <div className="text-center bg-background rounded-lg p-2">
+                        <div className="text-muted text-[9px]">Sell</div>
+                        <div className="font-bold text-red">₹{fiiDii.dii_sell?.toLocaleString("en-IN")}Cr</div>
+                      </div>
+                      <div className="text-center bg-background rounded-lg p-2">
+                        <div className="text-muted text-[9px]">Net</div>
+                        <div className={`font-bold ${(fiiDii.dii_net ?? 0) >= 0 ? "text-green" : "text-red"}`}>
+                          ₹{fiiDii.dii_net?.toLocaleString("en-IN")}Cr
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )
+            ) : (
+              <p className="text-xs text-muted">FII/DII data not available for this date</p>
+            )}
+            {ai?.fii_dii_analysis && (
+              <p className="text-xs text-foreground/70 mt-3 italic">{ai.fii_dii_analysis}</p>
+            )}
+          </div>
+
+          {/* Tomorrow Outlook */}
+          {ai?.tomorrow_outlook && (
+            <SummaryCard icon="🔮" title="Tomorrow's Outlook" content={ai.tomorrow_outlook} accent="purple" />
+          )}
+
+          {/* Risk Notes */}
+          {ai?.risk_notes && ai.risk_notes !== "N/A" && (
+            <SummaryCard icon="⚠️" title="Risk Notes" content={ai.risk_notes} accent="red" />
+          )}
+
+          {/* Trade Details */}
+          {selected.trade_details && selected.trade_details.length > 0 && (
+            <div className="bg-card rounded-xl border border-border p-4">
+              <div className="text-xs font-black text-foreground uppercase mb-3">📈 Trade Details</div>
+              <div className="space-y-2">
+                {selected.trade_details.map((t, i) => (
+                  <div key={i} className="bg-background rounded-lg p-3 flex items-center justify-between">
+                    <div>
+                      <span className="font-bold text-sm text-foreground">{t.symbol.replace(".NS", "")}</span>
+                      <span className="text-[10px] text-muted ml-2">Confluence: {t.confluence_score}/110</span>
+                    </div>
+                    <div className="text-right">
+                      <div className="text-xs font-bold text-foreground">₹{t.entry_price.toLocaleString("en-IN")}</div>
+                      <div className="text-[9px] text-muted">{t.reasoning?.[0]?.substring(0, 50)}...</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Exit Details */}
+          {selected.exit_details && selected.exit_details.length > 0 && (
+            <div className="bg-card rounded-xl border border-border p-4">
+              <div className="text-xs font-black text-foreground uppercase mb-3">📉 Exit Details</div>
+              <div className="space-y-2">
+                {selected.exit_details.map((t, i) => (
+                  <div key={i} className="bg-background rounded-lg p-3 flex items-center justify-between">
+                    <div>
+                      <span className="font-bold text-sm text-foreground">{t.symbol.replace(".NS", "")}</span>
+                      <span className="text-[10px] text-muted ml-2">{t.reasoning?.[0]}</span>
+                    </div>
+                    <div className={`text-sm font-bold ${t.pnl >= 0 ? "text-green" : "text-red"}`}>
+                      ₹{t.pnl.toLocaleString("en-IN")} ({t.pnl_pct.toFixed(1)}%)
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SummaryCard({
+  icon, title, content, accent = "border",
+}: {
+  icon: string; title: string; content: string; accent?: string;
+}) {
+  const borderColor = accent === "green" ? "border-green/30" :
+    accent === "yellow" ? "border-yellow/30" :
+    accent === "red" ? "border-red/30" :
+    accent === "purple" ? "border-purple-500/30" :
+    accent === "accent" ? "border-accent/30" : "border-border";
+
+  return (
+    <div className={`bg-card rounded-xl border ${borderColor} p-4`}>
+      <div className="flex items-center gap-2 mb-2">
+        <span>{icon}</span>
+        <span className="text-xs font-black text-foreground uppercase">{title}</span>
+      </div>
+      <p className="text-xs text-foreground/80 leading-relaxed">{content}</p>
+    </div>
+  );
+}
+
 function SettingsTab({ onSave }: { onSave: () => void }) {
   const [config, setConfig] = useState<Record<string, number | boolean | string>>({});
   const [saving, setSaving] = useState(false);
@@ -532,12 +1264,48 @@ function SettingsTab({ onSave }: { onSave: () => void }) {
 
   if (loading) return <div className="text-center text-muted py-8 text-sm">Loading config...</div>;
 
+  // Live calculations
+  const capital = Number(config.capital) || 0;
+  const riskPct = Number(config.risk_per_trade) || 0;
+  const maxHeat = Number(config.max_portfolio_heat) || 0;
+  const maxPos = Number(config.max_positions) || 1;
+  const riskRs = Math.round(capital * riskPct / 100);
+  const maxDeployed = Math.round(capital * maxHeat / 100);
+  const perPosition = maxPos > 0 ? Math.round(maxDeployed / maxPos) : 0;
+  const dailyTarget = Math.round(capital * 0.01); // 1% daily target
+
   return (
     <div className="bg-card rounded-xl border border-border p-6 space-y-5">
       <div className="flex items-center justify-between">
         <h3 className="text-sm font-black text-foreground uppercase">Auto Trader Configuration</h3>
-        {saved && <span className="text-xs text-green font-bold">✅ Saved!</span>}
+        {saved && <span className="text-xs text-green font-bold animate-pulse">✅ Saved & Applied!</span>}
       </div>
+
+      {/* Live Calculations Preview */}
+      {capital > 0 && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          <div className="bg-green/10 border border-green/30 rounded-lg p-2.5 text-center">
+            <div className="text-[9px] text-muted uppercase font-bold">Risk / Trade</div>
+            <div className="text-sm font-black text-green">₹{riskRs.toLocaleString("en-IN")}</div>
+            <div className="text-[9px] text-muted">{riskPct}% of capital</div>
+          </div>
+          <div className="bg-accent/10 border border-accent/30 rounded-lg p-2.5 text-center">
+            <div className="text-[9px] text-muted uppercase font-bold">Max Deployed</div>
+            <div className="text-sm font-black text-accent">₹{maxDeployed.toLocaleString("en-IN")}</div>
+            <div className="text-[9px] text-muted">{maxHeat}% heat limit</div>
+          </div>
+          <div className="bg-yellow/10 border border-yellow/30 rounded-lg p-2.5 text-center">
+            <div className="text-[9px] text-muted uppercase font-bold">Per Position</div>
+            <div className="text-sm font-black text-yellow">₹{perPosition.toLocaleString("en-IN")}</div>
+            <div className="text-[9px] text-muted">across {maxPos} stocks</div>
+          </div>
+          <div className="bg-purple-500/10 border border-purple-500/30 rounded-lg p-2.5 text-center">
+            <div className="text-[9px] text-muted uppercase font-bold">Daily Target</div>
+            <div className="text-sm font-black text-purple-400">₹{dailyTarget.toLocaleString("en-IN")}</div>
+            <div className="text-[9px] text-muted">1% of capital</div>
+          </div>
+        </div>
+      )}
 
       <div className="space-y-1">
         <div className="text-[10px] font-bold text-accent uppercase">Capital & Risk</div>
@@ -583,7 +1351,7 @@ function SettingsTab({ onSave }: { onSave: () => void }) {
             onChange={(e) => setConfig({ ...config, test_mode: e.target.checked })}
             className="w-4 h-4 rounded accent-green"
           />
-          Paper Trading Mode
+          Paper Trading Mode (no real money)
         </label>
         <label className="flex items-center gap-2 text-xs text-foreground cursor-pointer">
           <input
@@ -597,8 +1365,8 @@ function SettingsTab({ onSave }: { onSave: () => void }) {
       </div>
 
       <div className="bg-yellow/10 border border-yellow/30 rounded-lg p-3 text-xs text-yellow">
-        <strong>Tip:</strong> Lower Min Confluence (30-45) to see more trades. Set 75+ for strict/real trading.
-        No New Trades After controls the cutoff time (e.g. 15:00 = 3 PM).
+        <strong>Tip:</strong> Lower Min Confluence (45–60) to see more trades. Use 75+ for strict real trading.
+        Capital change is applied immediately to the portfolio.
       </div>
 
       <button
@@ -606,7 +1374,7 @@ function SettingsTab({ onSave }: { onSave: () => void }) {
         disabled={saving}
         className="bg-green hover:bg-green/80 text-white text-sm font-black px-6 py-3 rounded-xl shadow-lg shadow-green/20 transition-all"
       >
-        {saving ? "Saving..." : "💾 Save Configuration"}
+        {saving ? "Saving..." : "💾 Save & Apply Now"}
       </button>
     </div>
   );

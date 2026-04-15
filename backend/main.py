@@ -38,6 +38,8 @@ from auto_store import (
     get_portfolio as get_auto_portfolio, get_open_positions as get_auto_positions,
     get_trade_journal, get_pending_signals, get_scan_history,
     get_portfolio_stats as get_auto_stats, get_daily_summaries,
+    get_daily_summary_by_date, update_portfolio_capital,
+    get_strategy_performance, reset_strategy_performance,
 )
 
 load_dotenv()
@@ -506,10 +508,17 @@ def get_auto_config():
 
 @app.post("/api/auto-trader/config")
 def update_auto_config(config: dict):
+    old_cfg = load_auto_config()
     save_auto_config(config)
+    new_cfg = load_auto_config()
+    # If capital changed, update portfolio cash immediately
+    new_capital = new_cfg.get("capital")
+    if new_capital and new_capital != old_cfg.get("capital"):
+        update_portfolio_capital(new_capital)
+    # Push new config to running auto trader
     if auto_trader:
-        auto_trader.config = load_auto_config()
-    return {"status": "saved", "config": load_auto_config()}
+        auto_trader.config = new_cfg
+    return {"status": "saved", "config": new_cfg}
 
 
 @app.get("/api/auto-trader/portfolio")
@@ -548,6 +557,246 @@ def get_auto_performance():
         "stats": get_auto_stats(),
         "daily_summaries": get_daily_summaries(30),
     }
+
+
+@app.get("/api/auto-trader/daily-summaries")
+def get_auto_daily_summaries(last_n: int = 30):
+    """Get all daily summaries (date-wise)."""
+    return get_daily_summaries(last_n)
+
+
+@app.get("/api/auto-trader/daily-summary/{target_date}")
+def get_auto_daily_summary(target_date: str):
+    """Get daily summary for a specific date."""
+    summary = get_daily_summary_by_date(target_date)
+    if summary:
+        return summary
+    return {"error": f"No summary found for {target_date}"}
+
+
+@app.get("/api/auto-trader/daily-summary/{target_date}/download")
+def download_daily_summary(target_date: str):
+    """Download daily summary as CSV."""
+    from fastapi.responses import Response
+
+    summary = get_daily_summary_by_date(target_date)
+    if not summary:
+        return {"error": f"No summary found for {target_date}"}
+
+    ai = summary.get("ai_summary", {}).get("ai_analysis", {})
+    if not ai:
+        ai = summary.get("ai_analysis", {})
+
+    fii_dii = summary.get("ai_summary", {}).get("fii_dii", summary.get("fii_dii", {}))
+
+    lines = [
+        "DAILY TRADING SUMMARY",
+        f"Date,{summary.get('date', target_date)}",
+        "",
+        "PORTFOLIO",
+        f"Capital,{summary.get('capital', 0)}",
+        f"Cash,{summary.get('cash', 0)}",
+        f"Today P&L,{summary.get('today_pnl', 0)}",
+        f"Total P&L,{summary.get('total_pnl', 0)}",
+        f"Positions Held,{summary.get('positions_held', 0)}",
+        "",
+        "ACTIVITY",
+        f"Total Scans,{summary.get('total_scans', 0)}",
+        f"Trades Taken,{summary.get('trades_taken', 0)}",
+        f"Trades Exited,{summary.get('trades_exited', 0)}",
+        "",
+        "AI ANALYSIS",
+        f"Grade,{ai.get('grade', 'N/A')}",
+        f"Market Recap,\"{ai.get('market_recap', 'N/A')}\"",
+        f"Why Trades,\"{ai.get('why_trades', 'N/A')}\"",
+        f"Strategies Analysis,\"{ai.get('strategies_analysis', 'N/A')}\"",
+        f"Tomorrow Outlook,\"{ai.get('tomorrow_outlook', 'N/A')}\"",
+        f"Risk Notes,\"{ai.get('risk_notes', 'N/A')}\"",
+        "",
+        "BIG NEWS",
+    ]
+    for i, news in enumerate(ai.get("big_news", []), 1):
+        lines.append(f"{i},\"{news}\"")
+
+    lines.append("")
+    lines.append("FII/DII FLOWS")
+    if fii_dii.get("available"):
+        if fii_dii.get("headline"):
+            lines.append(f"Headline,\"{fii_dii['headline']}\"")
+        else:
+            lines.append(f"FII Buy,{fii_dii.get('fii_buy', 0)}")
+            lines.append(f"FII Sell,{fii_dii.get('fii_sell', 0)}")
+            lines.append(f"FII Net,{fii_dii.get('fii_net', 0)}")
+            lines.append(f"DII Buy,{fii_dii.get('dii_buy', 0)}")
+            lines.append(f"DII Sell,{fii_dii.get('dii_sell', 0)}")
+            lines.append(f"DII Net,{fii_dii.get('dii_net', 0)}")
+    else:
+        lines.append("Data,Not Available")
+
+    lines.append(f"FII/DII Analysis,\"{ai.get('fii_dii_analysis', 'N/A')}\"")
+
+    lines.append("")
+    lines.append("TRADE DETAILS")
+    lines.append("Symbol,Action,Confluence,Entry Price,Reasoning")
+    for t in summary.get("trade_details", []):
+        reasoning = "; ".join(t.get("reasoning", [])[:3])
+        lines.append(f"{t.get('symbol', '')},{t.get('action', '')},{t.get('confluence_score', 0)},{t.get('entry_price', 0)},\"{reasoning}\"")
+
+    lines.append("")
+    lines.append("EXIT DETAILS")
+    lines.append("Symbol,P&L,P&L %,Reasoning")
+    for t in summary.get("exit_details", []):
+        reasoning = "; ".join(t.get("reasoning", [])[:2])
+        lines.append(f"{t.get('symbol', '')},{t.get('pnl', 0)},{t.get('pnl_pct', 0)},\"{reasoning}\"")
+
+    csv_content = "\n".join(lines)
+    return Response(
+        content=csv_content,
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=trading_summary_{target_date}.csv"},
+    )
+
+
+@app.post("/api/auto-trader/generate-summary")
+async def generate_daily_summary_now():
+    """Manually generate/regenerate today's daily summary."""
+    global auto_trader
+    if auto_trader:
+        ai_summary = await auto_trader._generate_daily_summary()
+    else:
+        # Create a temporary auto trader to generate summary
+        from auto_store import save_daily_summary
+        cfg = load_auto_config()
+        temp_trader = AutoTrader(cfg)
+        temp_trader._cached_news = []
+        temp_trader._cached_sentiment = {"sentiment": "N/A"}
+        await temp_trader._refresh_news()
+        ai_summary = await temp_trader._generate_daily_summary()
+
+    from auto_store import save_daily_summary
+    save_daily_summary(ai_summary)
+    return {"status": "generated", "summary": ai_summary}
+
+
+@app.get("/api/auto-trader/strategy-performance")
+def get_strategy_perf():
+    """Get win rate, P&L, trade count per strategy (A, B, C, D and combinations)."""
+    return get_strategy_performance()
+
+
+@app.post("/api/auto-trader/strategy-performance/reset")
+def reset_strategy_perf():
+    """Reset all strategy performance data (start fresh)."""
+    reset_strategy_performance()
+    return {"status": "reset"}
+
+
+@app.post("/api/auto-trader/strategy-config")
+def update_strategy_config(body: dict):
+    """
+    Update active strategies and mode.
+    body: { active_strategies: ["A","B","C","D"], strategy_mode: "ALL_REQUIRED"|"ANY_TRIGGERS", smc_min_score: 60 }
+    """
+    allowed_keys = {"active_strategies", "strategy_mode", "smc_min_score", "smc_on_top_candidates_only"}
+    filtered = {k: v for k, v in body.items() if k in allowed_keys}
+    save_auto_config(filtered)
+    if auto_trader:
+        auto_trader.config = load_auto_config()
+    return {"status": "saved", "config": load_auto_config()}
+
+
+@app.post("/api/auto-trader/smc-analyze/{symbol}")
+async def analyze_smc_symbol(symbol: str):
+    """Run SMC/ICT analysis on a specific symbol on demand."""
+    from smc_engine import analyze_smc
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+    _exec = ThreadPoolExecutor(max_workers=1)
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(_exec, lambda: analyze_smc(symbol))
+    return result
+
+
+# ── Unified AI Orchestrator Endpoints ────────────────────────────────────────
+
+
+@app.post("/api/analyze/{symbol}")
+async def analyze_symbol_unified(symbol: str, body: dict = None):
+    """
+    Unified single-call AI analysis for a stock symbol.
+
+    Returns ALL dimensions in one response:
+      - technicalSignal (signal, confidence, summary)
+      - investorPerspectives (5 legendary investors)
+      - newsSentiment (score, label, summary)
+      - tradeRecommendation (entry, targets, stop-loss, reasoning)
+      - riskAnalysis (riskLevel, approved, summary)
+
+    Responses are cached for 5 minutes (keyed by symbol + indicator snapshot + news).
+    Pass {"force_refresh": true} in body to bypass cache.
+    """
+    from ai_orchestrator import analyze_stock as _orch, cache_stats
+    from market_engine import fetch_all_stocks
+    from news_engine import get_market_news, get_overall_sentiment
+
+    if body is None:
+        body = {}
+
+    force_refresh = body.get("force_refresh", False)
+
+    # Normalise symbol
+    if not symbol.endswith(".NS") and not symbol.endswith(".BO"):
+        symbol = symbol.upper() + ".NS"
+
+    try:
+        loop = asyncio.get_event_loop()
+
+        # Fetch stock data (runs all 12 indicators)
+        all_stocks = await loop.run_in_executor(executor, fetch_all_stocks)
+        stock = next((s for s in all_stocks if s.get("symbol") == symbol), None)
+
+        if not stock:
+            return {"error": f"Symbol {symbol} not found", "symbol": symbol}
+
+        news = await get_market_news()
+        sentiment = get_overall_sentiment(news)
+        market_sentiment = sentiment.get("sentiment", "NEUTRAL") if isinstance(sentiment, dict) else str(sentiment)
+
+        result = await loop.run_in_executor(
+            executor,
+            lambda: _orch(
+                stock=stock,
+                all_news=news,
+                market_sentiment=market_sentiment,
+                confluence=stock.get("score", 0),
+                capital=user_config.get("capital", 100_000),
+                risk_pct=user_config.get("risk_percent", 1.5),
+                force_refresh=force_refresh,
+            ),
+        )
+
+        result["_orchestrator_cache_stats"] = cache_stats()
+        return result
+
+    except Exception as e:
+        logger.error(f"/api/analyze/{symbol} error: {e}")
+        return {"error": str(e), "symbol": symbol}
+
+
+@app.get("/api/analyze/cache/stats")
+def orchestrator_cache_stats():
+    """Return current state of the AI orchestrator in-memory cache."""
+    from ai_orchestrator import cache_stats
+    return cache_stats()
+
+
+@app.delete("/api/analyze/cache/clear")
+def orchestrator_cache_clear():
+    """Flush the entire orchestrator cache (forces fresh AI calls on next analysis)."""
+    from ai_orchestrator import _cache
+    count = len(_cache)
+    _cache.clear()
+    return {"cleared": count}
 
 
 @app.post("/api/auto-trader/scan-now")

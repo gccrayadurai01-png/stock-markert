@@ -293,6 +293,147 @@ export interface AutoTraderData {
   stats: AutoTraderStats;
   risk_status: { can_trade: boolean; reason: string; max_positions?: number; positions?: number; portfolio_heat?: number; cash_available?: number };
   intelligence?: AutoTraderIntelligence;
+  strategy_config?: StrategyConfig;
+}
+
+// ── Strategy / SMC Types ───────────────────────────────────────────────
+
+export type StrategyId = "A" | "B" | "C" | "D";
+export type StrategyMode = "ALL_REQUIRED" | "ANY_TRIGGERS";
+
+export interface StrategyPerformance {
+  trades: number;
+  wins: number;
+  losses: number;
+  pnl: number;
+  win_rate: number;
+  avg_win: number;
+  avg_loss: number;
+  best_pnl: number;
+  worst_pnl: number;
+}
+
+export interface StrategyPerformanceMap {
+  [key: string]: StrategyPerformance;  // "A", "B", "C", "D", "A+B", "A+B+C+D" etc.
+  _trade_log?: Array<{
+    symbol: string; strategy: string; pnl: number;
+    strategies_confirmed: string[]; scores: Record<string, number>;
+    date: string; timestamp: string;
+  }>;
+}
+
+export interface StrategyConfig {
+  active_strategies: StrategyId[];
+  strategy_mode: StrategyMode;
+  smc_min_score: number;
+  smc_on_top_candidates_only?: boolean;
+}
+
+export interface SMCOrderBlock {
+  type: "BULLISH" | "BEARISH";
+  high: number; low: number; mid: number;
+  index: number; touched: boolean; fresh: boolean;
+}
+
+export interface SMCFairValueGap {
+  type: "BULLISH" | "BEARISH";
+  high: number; low: number; mid: number;
+  size: number; filled: boolean;
+}
+
+export interface SMCAnalysis {
+  available: boolean;
+  symbol: string;
+  smc_score: number;
+  signal: "BULLISH" | "BEARISH" | "NEUTRAL" | "NO_DATA";
+  reasons: string[];
+  missing: string[];
+  structure?: {
+    trend: string; last_event: { type: string; direction: string; label: string } | null;
+    choch: boolean; bias: string;
+    swing_highs: Array<{ price: number; index: number }>;
+    swing_lows: Array<{ price: number; index: number }>;
+  };
+  order_blocks?: SMCOrderBlock[];
+  fair_value_gaps?: SMCFairValueGap[];
+  premium_discount?: {
+    zone: "PREMIUM" | "DISCOUNT" | "NEUTRAL"; pct: number;
+    swing_high: number; swing_low: number; equilibrium: number;
+    fib_382: number; fib_618: number; fib_79: number;
+    in_ote_buy: boolean; in_ote_sell: boolean;
+  };
+  liquidity?: {
+    sell_side_liquidity: number[]; buy_side_liquidity: number[];
+    prev_session_high: number; prev_session_low: number;
+  };
+  current_price?: number;
+  candles_used?: number;
+  interval?: string;
+}
+
+// Daily Summary Types
+export interface DailySummaryAIAnalysis {
+  market_recap: string;
+  why_trades: string;
+  strategies_analysis: string;
+  big_news: string[];
+  fii_dii_analysis: string;
+  tomorrow_outlook: string;
+  risk_notes: string;
+  grade: string;
+}
+
+export interface FIIDIIData {
+  fii_buy: number;
+  fii_sell: number;
+  fii_net: number;
+  dii_buy: number;
+  dii_sell: number;
+  dii_net: number;
+  source: string;
+  date: string;
+  available: boolean;
+  headline?: string;
+}
+
+export interface DailySummaryTradeDetail {
+  symbol: string;
+  action: string;
+  confluence_score: number;
+  entry_price: number;
+  reasoning: string[];
+}
+
+export interface DailySummaryExitDetail {
+  symbol: string;
+  pnl: number;
+  pnl_pct: number;
+  reasoning: string[];
+}
+
+export interface DailySummary {
+  date: string;
+  capital: number;
+  cash: number;
+  positions_held: number;
+  today_pnl: number;
+  total_pnl: number;
+  total_scans: number;
+  trades_taken: number;
+  trades_exited: number;
+  trades_skipped: number;
+  trade_details: DailySummaryTradeDetail[];
+  exit_details: DailySummaryExitDetail[];
+  stats: AutoTraderStats;
+  ai_summary?: {
+    ai_analysis: DailySummaryAIAnalysis;
+    fii_dii: FIIDIIData;
+    market_sentiment: string;
+    news_headlines: string[];
+  };
+  // Also support flat ai_analysis (when generated manually)
+  ai_analysis?: DailySummaryAIAnalysis;
+  fii_dii?: FIIDIIData;
 }
 
 // Navigation
