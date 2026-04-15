@@ -2,6 +2,14 @@
 AI Signal Engine — Jhunjhunwala-style brutal trading brain.
 Combines 12 technical indicators + news + fundamentals + legendary investor perspectives.
 No sugarcoating. Data-driven decisions only.
+
+Architecture note (prompt batching):
+  generate_signals() makes ONE market-level Claude call to pick the best trades.
+  After that, for each recommended trade we call ai_orchestrator.analyze_stock()
+  which is ALSO one call per stock — but results are CACHED (5-min TTL) so
+  repeated scans within the same candle window hit the cache, not the API.
+  This replaces the old pattern of calling analyze_through_investor_lenses()
+  (rule-based, no AI) as a post-processing step.
 """
 from __future__ import annotations
 
@@ -11,11 +19,26 @@ import logging
 from typing import List
 from pathlib import Path
 from anthropic import Anthropic
-from investor_perspectives import analyze_through_investor_lenses
+from ai_orchestrator import (
+    analyze_stock as orchestrate_stock,
+    get_investor_perspectives_legacy,
+    cache_stats,
+)
 
 logger = logging.getLogger(__name__)
 
 client = None
+
+
+def get_overall_sentiment_str(news: list) -> str:
+    """Collapse news list into a single sentiment label for prompt injection."""
+    bull = sum(1 for n in news if n.get("sentiment") == "BULLISH")
+    bear = sum(1 for n in news if n.get("sentiment") == "BEARISH")
+    if bull > bear * 1.5:
+        return "BULLISH"
+    if bear > bull * 1.5:
+        return "BEARISH"
+    return "NEUTRAL"
 
 def _load_api_key() -> str:
     """Load API key from env or .env file."""
@@ -224,28 +247,57 @@ INSTRUCTIONS:
 
         result = json.loads(text)
 
-        # ─── POST-PROCESS: Add investor perspectives to Claude's trades ───
-        # Enhance each recommended trade with legendary investor analysis
+        # ─── POST-PROCESS: Enrich trades via unified orchestrator ───────────
+        # One cached AI call per trade gives investor perspectives + news sentiment
+        # + risk assessment in a single round-trip (cache hit = zero extra API calls).
         recommended_trades = result.get("recommended_trades", [])
-        for trade in recommended_trades:
-            symbol = trade.get("symbol")
-            # Find the original stock data to get indicators
-            for stock in market_data.get("all_stocks", []):
-                if stock.get("symbol") == symbol:
-                    investor_analysis = analyze_through_investor_lenses(stock, stock.get("indicators", {}))
-                    # Add investor perspectives to trade
-                    trade["investor_perspectives"] = investor_analysis["investor_perspectives"]
-                    trade["investor_consensus"] = investor_analysis["consensus"]
+        stock_lookup = {s["symbol"]: s for s in market_data.get("all_stocks", [])}
+        overall_sentiment = get_overall_sentiment_str(news)
 
-                    # Boost Claude's confidence based on investor agreement
-                    original_conf = trade.get("confidence", 5)
-                    investor_boost = investor_analysis["consensus"]["confidence_boost"]
-                    if investor_boost > 0:
-                        trade["confidence"] = min(10, original_conf + investor_boost / 10)
-                        trade["reason"] += f"\n\n✅ INVESTOR CONSENSUS BOOST: {investor_analysis['consensus']['key_insight']}"
-                    break
+        for trade in recommended_trades:
+            symbol = trade.get("symbol", "")
+            stock = stock_lookup.get(symbol)
+            if not stock:
+                continue
+
+            orch = orchestrate_stock(
+                stock=stock,
+                all_news=news,
+                market_sentiment=overall_sentiment,
+                confluence=int(trade.get("confidence", 5) * 11),  # scale 1-10 → approx 0-110
+                capital=user_capital,
+                risk_pct=config.get("risk_percent", 1.5),
+            )
+
+            # Attach AI investor perspectives (legacy format for frontend)
+            trade["investor_perspectives"] = get_investor_perspectives_legacy(orch)
+
+            # Build consensus summary from orchestrator output
+            persp = orch.get("investorPerspectives", [])
+            bullish_count = sum(1 for p in persp if p.get("view") == "BULLISH")
+            bearish_count = sum(1 for p in persp if p.get("view") == "BEARISH")
+            trade["investor_consensus"] = {
+                "bullish_count": bullish_count,
+                "bearish_count": bearish_count,
+                "neutral_count": len(persp) - bullish_count - bearish_count,
+                "avg_confidence": orch.get("technicalSignal", {}).get("confidence", 50),
+                "confidence_boost": bullish_count * 2,
+                "aggregate_signal": "BULLISH" if bullish_count > bearish_count else (
+                    "BEARISH" if bearish_count > bullish_count else "NEUTRAL"
+                ),
+                "aggregate_confidence": orch.get("technicalSignal", {}).get("confidence", 50),
+                "key_insight": orch.get("newsSentiment", {}).get("summary", ""),
+            }
+
+            # Boost confidence based on investor agreement
+            original_conf = trade.get("confidence", 5)
+            if bullish_count >= 3:
+                trade["confidence"] = min(10, original_conf + 1)
+                trade["reason"] += f"\n\n✅ INVESTOR CONSENSUS: {bullish_count}/5 legends bullish — {orch.get('newsSentiment', {}).get('summary', '')}"
 
         result["recommended_trades"] = recommended_trades
+        stats = cache_stats()
+        logger.info(f"[AI Engine] Orchestrator cache: {stats['valid']}/{stats['total']} valid entries")
         return result
 
     except json.JSONDecodeError as e:
@@ -327,25 +379,24 @@ def _fallback_signals(market_data: dict, capital: float, max_trades: int, risk_p
         elif bb_pct > 0.8:
             insights.append(f"Bollinger %B={bb_pct:.0%} — near upper band, may face resistance")
 
-        # ─── APPLY LEGENDARY INVESTOR PERSPECTIVES ───────────────────────────
-        # Get insights from Jhunjhunwala, Buffett, Burry, Cathie Wood, Peter Lynch
-        investor_analysis = analyze_through_investor_lenses(s, ind)
-        investor_boost = investor_analysis["consensus"]["confidence_boost"]
-        investor_consensus = investor_analysis["consensus"]["key_insight"]
+        # ─── ORCHESTRATOR: unified investor perspectives (fallback path, no AI) ──
+        # In fallback mode we use orchestrator's _fallback_analysis (rule-based)
+        # so investor perspectives are always present with the right schema.
+        orch = orchestrate_stock(
+            stock=s,
+            all_news=[],          # no news in fallback path
+            market_sentiment="NEUTRAL",
+            confluence=s.get("score", 0),
+        )
+        investor_perspectives = get_investor_perspectives_legacy(orch)
+        bullish_investors = [p["investor"] for p in investor_perspectives if "BUY" in p.get("signal", "")]
+        bullish_count = len(bullish_investors)
 
-        # Boost confidence if multiple investors agree
         base_confidence = min(10, max(1, s["score"] // 5))
-        final_confidence = min(10, base_confidence + investor_boost / 10)  # Scale boost to 1-10 range
+        final_confidence = min(10, base_confidence + bullish_count * 0.2)
 
-        insights.append(f"\n💡 INVESTOR CONSENSUS: {investor_consensus}")
-
-        # List which investors are bullish
-        bullish_investors = [
-            p["investor"] for p in investor_analysis["investor_perspectives"]
-            if "BUY" in p["signal"]
-        ]
         if bullish_investors:
-            insights.append(f"✅ Bullish: {', '.join(bullish_investors)}")
+            insights.append(f"\n💡 Bullish: {', '.join(bullish_investors)}")
 
         cap_pct = round(deploy / capital * 100, 1)
         reason = (
@@ -379,7 +430,7 @@ def _fallback_signals(market_data: dict, capital: float, max_trades: int, risk_p
             "reason": reason,
             "risk": " | ".join(risk_text),
             "indicator_summary": " | ".join(insights),
-            "investor_perspectives": investor_analysis["investor_perspectives"],  # Include detailed investor views
+            "investor_perspectives": investor_perspectives,
         })
 
     avoid = []

@@ -149,102 +149,106 @@ class AutoTrader:
             # 5. Risk check — can we take new trades?
             risk = self._check_risk_limits()
 
-            # 6. Evaluate entries with MULTI-STRATEGY intelligence
+            # 6. Evaluate entries — INDEPENDENT STRATEGY MODE
+            # ANY strategy firing = take the trade (no more ALL_REQUIRED)
             pending_signals = []
             entries_made = 0
-            active_strategies = self.config.get("active_strategies", ["A", "B", "C"])
-            strategy_mode = self.config.get("strategy_mode", "ALL_REQUIRED")
 
             if risk["can_trade"]:
                 for stock in all_stocks:
-                    result = await self._evaluate_entry_multi_strategy(stock, active_strategies)
-                    if not result:
+                    strategy_results = await self._evaluate_all_strategies(stock)
+                    if not strategy_results:
                         continue
 
-                    passes = self._check_strategy_gate(result, strategy_mode, active_strategies)
-                    confluence = result["confluence"]
+                    # Find the best firing strategy for this stock
+                    best_id = None
+                    best_score = 0
+                    for sid, sres in strategy_results.items():
+                        if sres["fires"] and sres["score"] > best_score:
+                            best_id = sid
+                            best_score = sres["score"]
 
-                    if passes and confluence >= self.config.get("min_confluence", 75):
-                        # ── AI RISK GATE via Orchestrator (replaces _get_ai_confirmation) ──
-                        # The orchestrator is called once per stock and CACHED.
-                        # For 85+ confluence trades, we use the orchestrator's riskAnalysis.approved
-                        # instead of a separate Claude call — saving one API round-trip per trade.
-                        ai_confirmed = True
-                        ai_reasoning = ""
-                        if confluence >= 85 and self.config.get("use_ai_confirmation", True):
+                    if best_id:
+                        best = strategy_results[best_id]
+                        # Build entry analysis from winning strategy
+                        entry_analysis = {
+                            "confluence": best["score"],
+                            "reasons": best["reasons"],
+                            "missing": best["missing"],
+                            "strategy_id": best_id,
+                            "strategy_name": best["name"],
+                            "strategy_emoji": best["emoji"],
+                            "strategies_confirmed": [best_id],
+                            "strategy_scores": {sid: r["score"] for sid, r in strategy_results.items()},
+                        }
+
+                        # AI confirmation for high-score trades (score >= 80)
+                        ai_reasoning = "N/A"
+                        if best_score >= 80 and self.config.get("use_ai_confirmation", True):
                             try:
-                                from ai_orchestrator import analyze_stock as _orch, is_trade_approved
-                                orch_result = _orch(
-                                    stock=stock,
-                                    all_news=self._cached_news,
-                                    market_sentiment=self._cached_sentiment.get("sentiment", "NEUTRAL"),
-                                    confluence=confluence,
-                                    reasons=result.get("reasons", []),
-                                    missing=result.get("missing", []),
-                                    capital=self.config.get("capital", 100_000),
-                                    risk_pct=self.config.get("risk_per_trade", 1.5),
-                                )
-                                ai_confirmed = is_trade_approved(orch_result)
-                                ai_reasoning = orch_result.get("riskAnalysis", {}).get("summary", "")
-                                cached_flag = "cache HIT" if orch_result.get("_cached") else "API call"
-                                logger.info(
-                                    f"🤖🧠 Orchestrator [{cached_flag}] {stock['symbol']}: "
-                                    f"{'✅ APPROVED' if ai_confirmed else '❌ REJECTED'} — {ai_reasoning}"
-                                )
+                                ai_result = await self._get_ai_confirmation(stock, entry_analysis)
+                                if not ai_result.get("confirmed", True):
+                                    ai_reasoning = ai_result.get("reasoning", "Rejected")
+                                    pending_signals.append({
+                                        "symbol": stock["symbol"],
+                                        "name": stock.get("name", ""),
+                                        "price": stock.get("price", 0),
+                                        "confluence_score": best_score,
+                                        "strategy_id": best_id,
+                                        "strategy_name": best["name"],
+                                        "missing": [f"AI rejected: {ai_reasoning}"],
+                                        "met_conditions": best["reasons"],
+                                        "strategy_scores": entry_analysis["strategy_scores"],
+                                        "strategies_confirmed": [best_id],
+                                    })
+                                    continue
+                                ai_reasoning = ai_result.get("reasoning", "Approved")
                             except Exception as e:
-                                logger.warning(f"Orchestrator gate failed for {stock['symbol']}: {e} — proceeding")
-                                ai_confirmed = True
-                                ai_reasoning = f"Orchestrator error: {e}"
-
-                            if not ai_confirmed:
-                                result["reasons"].append(f"⚠️ Orchestrator rejected: {ai_reasoning}")
-                                pending_signals.append({
-                                    "symbol": stock["symbol"],
-                                    "name": stock.get("name", ""),
-                                    "price": stock.get("price", 0),
-                                    "confluence_score": confluence,
-                                    "missing": [f"Risk gate rejected: {ai_reasoning}"],
-                                    "met_conditions": result.get("reasons", []),
-                                    "strategy_scores": result.get("strategy_scores", {}),
-                                    "strategies_confirmed": result.get("strategies_confirmed", []),
-                                })
-                                continue
+                                logger.warning(f"AI confirmation error for {stock['symbol']}: {e}")
 
                         # EXECUTE PAPER TRADE
-                        trade = self._execute_entry(stock, result)
+                        trade = self._execute_entry(stock, entry_analysis)
                         if trade:
                             entries_made += 1
-                            strategy_key = "+".join(sorted(result.get("strategies_confirmed", active_strategies)))
                             log_trade_decision({
                                 "action": "ENTER",
                                 "symbol": stock["symbol"],
                                 "name": stock.get("name", ""),
-                                "confluence_score": confluence,
+                                "confluence_score": best_score,
                                 "entry_price": trade["entry_price"],
                                 "stop_loss": trade["stop_loss"],
                                 "target_1": trade["target_1"],
                                 "shares": trade["shares"],
-                                "reasoning": result["reasons"],
-                                "ai_confirmation": ai_reasoning if ai_reasoning else "N/A",
-                                "news_sentiment": result.get("news_sentiment", "N/A"),
-                                "investor_consensus": result.get("investor_data", {}),
+                                "reasoning": best["reasons"],
+                                "ai_confirmation": ai_reasoning,
+                                "strategy_key": best_id,
+                                "strategy_name": best["name"],
+                                "strategy_scores": entry_analysis["strategy_scores"],
+                                "strategies_confirmed": [best_id],
                                 "indicator_snapshot": self._snapshot(stock),
-                                "strategy_key": strategy_key,
-                                "strategy_scores": result.get("strategy_scores", {}),
-                                "strategies_confirmed": result.get("strategies_confirmed", []),
                             })
-                    elif confluence >= 45:
-                        # Near threshold — add to watchlist
-                        pending_signals.append({
-                            "symbol": stock["symbol"],
-                            "name": stock.get("name", ""),
-                            "price": stock.get("price", 0),
-                            "confluence_score": confluence,
-                            "missing": result.get("missing", []),
-                            "met_conditions": result.get("reasons", []),
-                            "strategy_scores": result.get("strategy_scores", {}),
-                            "strategies_confirmed": result.get("strategies_confirmed", []),
-                        })
+                            logger.info(
+                                f"🤖{best['emoji']} TRADE: {best['name']} fired on {stock['symbol']} "
+                                f"@ ₹{stock.get('price', 0):.0f} | Score: {best_score}/100"
+                            )
+
+                    else:
+                        # Check if any strategy is getting close (watchlist)
+                        best_near = max(strategy_results.items(), key=lambda x: x[1]["score"], default=(None, {"score": 0}))
+                        near_id, near_res = best_near
+                        if near_id and near_res["score"] >= 35:
+                            pending_signals.append({
+                                "symbol": stock["symbol"],
+                                "name": stock.get("name", ""),
+                                "price": stock.get("price", 0),
+                                "confluence_score": near_res["score"],
+                                "strategy_id": near_id,
+                                "strategy_name": near_res["name"],
+                                "missing": near_res["missing"][:3],
+                                "met_conditions": near_res["reasons"][:4],
+                                "strategy_scores": {sid: r["score"] for sid, r in strategy_results.items()},
+                                "strategies_confirmed": [],
+                            })
 
             # 7. Save scan result
             elapsed = round(time.time() - start_time, 1)
@@ -403,196 +407,372 @@ Respond ONLY with JSON: {{"confirmed": true/false, "reasoning": "one sentence wh
             logger.warning(f"🤖 AI confirmation failed: {e} — proceeding with trade")
             return {"confirmed": True, "reasoning": f"AI error: {e} — proceeding on indicators"}
 
-    # ── MULTI-STRATEGY FRAMEWORK ───────────────────────────────────────
+    # ── 4 INDEPENDENT STRATEGIES ──────────────────────────────────────────
+    # Each strategy fires on its own. ANY one passing = trade taken.
+    #
+    #  A — Momentum Breakout   : RSI building + MACD BUY + Volume spike + Supertrend UP
+    #  B — Oversold Reversal   : RSI < 38 + BB lower band + Stochastic oversold
+    #  C — Trend Rider         : ADX > 25 + EMA aligned + Supertrend + OBV rising
+    #  D — News + Smart Money  : Bullish stock news + Investor consensus + Volume
+    # ─────────────────────────────────────────────────────────────────────
 
-    async def _evaluate_entry_multi_strategy(self, stock: dict, active_strategies: list) -> Optional[dict]:
+    STRATEGY_META = {
+        "A": {"name": "Momentum Breakout",  "emoji": "🚀", "min_score": 60, "color": "green"},
+        "B": {"name": "Oversold Reversal",  "emoji": "📉", "min_score": 55, "color": "blue"},
+        "C": {"name": "Trend Rider",        "emoji": "🏄", "min_score": 60, "color": "yellow"},
+        "D": {"name": "News Catalyst",      "emoji": "📰", "min_score": 50, "color": "purple"},
+    }
+
+    async def _evaluate_all_strategies(self, stock: dict) -> Optional[dict]:
         """
-        Evaluate a stock across all active strategies (A, B, C, D) independently.
-        Returns combined result with per-strategy scores and an overall confluence.
-        Strategy A = Technical Indicators
-        Strategy B = Investor Perspectives
-        Strategy C = News Sentiment
-        Strategy D = SMC / ICT
+        Evaluate all 4 strategies INDEPENDENTLY.
+        Returns dict of strategy results. Any strategy that fires (score >= min) triggers a trade.
+        Only the BEST scoring strategy is used if multiple fire on the same stock.
         """
         ind = stock.get("indicators", {})
         if not ind:
             return None
         symbol = stock.get("symbol", "")
 
-        # Skip if already holding
+        # Skip if already holding this stock
         for pos in get_open_positions():
             if pos["symbol"] == symbol:
                 return None
 
-        strategy_scores = {}
-        strategies_confirmed = []
-        all_reasons = []
-        all_missing  = []
+        active = self.config.get("active_strategies", ["A", "B", "C", "D"])
+        results = {}
 
-        # ── Strategy A: Technical Indicators ──────────────────────────
-        if "A" in active_strategies:
-            a_score, a_reasons, a_missing = self._score_indicators(stock)
-            strategy_scores["A"] = a_score
-            all_reasons.extend(a_reasons)
-            all_missing.extend(a_missing)
-            if a_score >= 40:
-                strategies_confirmed.append("A")
+        if "A" in active:
+            score, reasons, missing = self._score_strategy_A(stock, ind)
+            fires = score >= self.STRATEGY_META["A"]["min_score"]
+            results["A"] = {"score": score, "fires": fires, "reasons": reasons, "missing": missing,
+                            "name": "Momentum Breakout", "emoji": "🚀"}
 
-        # ── Strategy B: Investor Perspectives ──────────────────────────
-        if "B" in active_strategies:
-            b_score, b_reasons, b_missing, investor_data = self._score_investor_perspectives(stock, ind)
-            strategy_scores["B"] = b_score
-            all_reasons.extend(b_reasons)
-            all_missing.extend(b_missing)
-            if b_score >= 3:  # 3+ out of 5 investors bullish
-                strategies_confirmed.append("B")
-        else:
-            investor_data = {}
+        if "B" in active:
+            score, reasons, missing = self._score_strategy_B(stock, ind)
+            fires = score >= self.STRATEGY_META["B"]["min_score"]
+            results["B"] = {"score": score, "fires": fires, "reasons": reasons, "missing": missing,
+                            "name": "Oversold Reversal", "emoji": "📉"}
 
-        # ── Strategy C: News Sentiment ─────────────────────────────────
-        if "C" in active_strategies:
-            c_score, c_reasons, c_missing, news_sent = self._score_news(symbol)
-            strategy_scores["C"] = c_score
-            all_reasons.extend(c_reasons)
-            all_missing.extend(c_missing)
-            if c_score >= 5:
-                strategies_confirmed.append("C")
-        else:
-            news_sent = "N/A"
+        if "C" in active:
+            score, reasons, missing = self._score_strategy_C(stock, ind)
+            fires = score >= self.STRATEGY_META["C"]["min_score"]
+            results["C"] = {"score": score, "fires": fires, "reasons": reasons, "missing": missing,
+                            "name": "Trend Rider", "emoji": "🏄"}
 
-        # ── Strategy D: SMC / ICT ──────────────────────────────────────
-        smc_data = {}
-        if "D" in active_strategies:
-            # Only run SMC on stocks that pass basic indicator check (saves API calls)
-            run_smc = True
-            if self.config.get("smc_on_top_candidates_only", True):
-                ind_score = strategy_scores.get("A", 0)
-                run_smc = ind_score >= 30 or "A" not in active_strategies
+        if "D" in active:
+            score, reasons, missing = self._score_strategy_D(stock, ind, symbol)
+            fires = score >= self.STRATEGY_META["D"]["min_score"]
+            results["D"] = {"score": score, "fires": fires, "reasons": reasons, "missing": missing,
+                            "name": "News Catalyst", "emoji": "📰"}
 
-            if run_smc:
-                try:
-                    loop = asyncio.get_event_loop()
-                    smc_data = await loop.run_in_executor(executor,
-                        lambda: analyze_smc(symbol, stock.get("price", 0)))
-                    d_score = smc_data.get("smc_score", 0)
-                    strategy_scores["D"] = d_score
-                    if smc_data.get("available"):
-                        all_reasons.extend([f"[SMC] {r}" for r in smc_data.get("reasons", [])])
-                        all_missing.extend([f"[SMC] {m}" for m in smc_data.get("missing", [])])
-                    if d_score >= self.config.get("smc_min_score", 60):
-                        strategies_confirmed.append("D")
-                except Exception as e:
-                    logger.warning(f"SMC analysis failed for {symbol}: {e}")
-                    strategy_scores["D"] = 0
-            else:
-                strategy_scores["D"] = 0
+        return results if results else None
 
-        # ── Combined Confluence Score ──────────────────────────────────
-        # Weighted combination of active strategy scores (normalised 0–110)
-        weights = {"A": 0.40, "B": 0.25, "C": 0.20, "D": 0.15}
-        norm    = {"A": 110,  "B": 15,   "C": 10,   "D": 100}
-
-        total_weight = sum(weights[s] for s in active_strategies if s in weights)
-        weighted_sum = 0.0
-        for s in active_strategies:
-            if s in strategy_scores and s in weights and s in norm:
-                pct = min(1.0, strategy_scores[s] / norm[s])
-                weighted_sum += pct * weights[s]
-
-        confluence = int((weighted_sum / total_weight) * 110) if total_weight > 0 else 0
-        confluence = max(0, min(110, confluence))
-
-        return {
-            "confluence": confluence,
-            "reasons": all_reasons,
-            "missing": all_missing,
-            "strategy_scores": strategy_scores,
-            "strategies_confirmed": strategies_confirmed,
-            "news_sentiment": news_sent if "C" in active_strategies else "N/A",
-            "investor_data": investor_data,
-            "smc_data": smc_data,
-        }
-
-    def _check_strategy_gate(self, result: dict, mode: str, active_strategies: list) -> bool:
+    def _score_strategy_A(self, stock: dict, ind: dict) -> tuple:
         """
-        ALL_REQUIRED: Every active strategy must confirm (strategies_confirmed = active_strategies).
-        ANY_TRIGGERS: At least one active strategy confirms.
+        Strategy A — MOMENTUM BREAKOUT
+        Looks for: RSI building momentum (50-68) + MACD bullish cross +
+                   Volume spike confirming breakout + Supertrend/VWAP bullish
+        Score: 0-100
         """
-        confirmed = set(result.get("strategies_confirmed", []))
-        active    = set(active_strategies)
-
-        if mode == "ALL_REQUIRED":
-            return active.issubset(confirmed)
-        else:  # ANY_TRIGGERS
-            return bool(confirmed & active)
-
-    def _score_indicators(self, stock: dict) -> tuple:
-        """Strategy A: Pure technical indicator score. Returns (score 0-110, reasons, missing)."""
-        ind = stock.get("indicators", {})
         score = 0
         reasons = []
         missing = []
 
-        stock_score = stock.get("score", 0)
-        if stock_score >= 30:
-            score += 20; reasons.append(f"[A] Strong score: {stock_score}")
-        elif stock_score >= 20:
-            score += 12; reasons.append(f"[A] Good score: {stock_score}")
-        elif stock_score >= 10:
-            score += 5;  reasons.append(f"[A] Moderate score: {stock_score}")
-        else:
-            missing.append(f"[A] Weak indicator score: {stock_score}")
-
-        votes = stock.get("votes", {})
-        buy_votes = votes.get("BUY", 0)
-        total_votes = buy_votes + votes.get("SELL", 0) + votes.get("NEUTRAL", 0)
-        if total_votes > 0:
-            if buy_votes >= 8:   score += 15; reasons.append(f"[A] Strong consensus: {buy_votes}/{total_votes} BUY")
-            elif buy_votes >= 6: score += 8;  reasons.append(f"[A] Moderate consensus: {buy_votes}/{total_votes} BUY")
-            elif buy_votes >= 4: score += 3;  reasons.append(f"[A] Weak BUY lean: {buy_votes}/{total_votes}")
-            else:                missing.append(f"[A] No BUY consensus: {buy_votes}/{total_votes}")
-
         rsi = ind.get("rsi", {}).get("value", 50)
-        if 30 <= rsi <= 45:   score += 10; reasons.append(f"[A] RSI sweet spot: {rsi:.0f}")
-        elif 45 < rsi <= 55:  score += 7;  reasons.append(f"[A] RSI neutral: {rsi:.0f}")
-        elif 55 < rsi <= 65:  score += 4;  reasons.append(f"[A] RSI rising: {rsi:.0f}")
-        elif rsi > 75:        score -= 3;  missing.append(f"[A] RSI overbought: {rsi:.0f}")
-        else:                              missing.append(f"[A] RSI: {rsi:.0f}")
-
+        macd_vote = ind.get("macd", {}).get("vote", "NEUTRAL")
         supertrend = ind.get("supertrend", {}).get("direction", "")
-        ema_align  = ind.get("ema_crossover", {}).get("alignment", "")
-        if supertrend == "UP" and ema_align == "BULLISH":
-            score += 10; reasons.append("[A] Supertrend UP + EMA Bullish")
-        elif supertrend == "UP":
-            score += 5;  reasons.append("[A] Supertrend UP")
-        elif ema_align == "BULLISH":
-            score += 5;  reasons.append("[A] EMA Bullish")
-        else:
-            missing.append("[A] No trend alignment")
-
-        macd_vote = ind.get("macd", {}).get("vote", "")
-        adx_val   = ind.get("adx", {}).get("adx", 0)
-        if macd_vote == "BUY" and adx_val > 25:
-            score += 10; reasons.append(f"[A] MACD bullish + ADX {adx_val:.0f}")
-        elif macd_vote == "BUY":
-            score += 5;  reasons.append("[A] MACD bullish")
-        else:
-            missing.append(f"[A] No MACD/ADX confirmation")
-
+        ema_align = ind.get("ema_crossover", {}).get("alignment", "NEUTRAL")
+        vwap_vote = ind.get("vwap", {}).get("vote", "NEUTRAL")
         vol_spike = ind.get("volume", {}).get("spike", False)
         vol_ratio = ind.get("volume", {}).get("ratio", 1.0)
-        if vol_spike:      score += 10; reasons.append(f"[A] Volume spike ({vol_ratio:.1f}x)")
-        elif vol_ratio > 1.3: score += 5; reasons.append(f"[A] Above-avg volume ({vol_ratio:.1f}x)")
-        else:              missing.append(f"[A] Low volume: {vol_ratio:.1f}x")
+        adx_val = ind.get("adx", {}).get("adx", 0)
+        votes = stock.get("votes", {})
+        buy_votes = votes.get("BUY", 0)
 
+        # RSI in momentum zone (not overbought, building steam) — 30 pts
+        if 50 <= rsi <= 65:
+            score += 30; reasons.append(f"[A] RSI {rsi:.0f} — momentum building")
+        elif 45 <= rsi < 50:
+            score += 15; reasons.append(f"[A] RSI {rsi:.0f} — approaching momentum zone")
+        elif 65 < rsi <= 72:
+            score += 10; reasons.append(f"[A] RSI {rsi:.0f} — strong but watch overbought")
+        elif rsi > 72:
+            score -= 5;  missing.append(f"[A] RSI {rsi:.0f} — overbought, skip")
+        else:
+            missing.append(f"[A] RSI {rsi:.0f} — below momentum zone")
+
+        # MACD bullish crossover — 25 pts
+        if macd_vote == "BUY":
+            score += 25; reasons.append("[A] MACD bullish crossover confirmed")
+        else:
+            missing.append("[A] MACD not bullish yet")
+
+        # Volume spike = institutional participation — 20 pts
+        if vol_spike:
+            score += 20; reasons.append(f"[A] Volume spike {vol_ratio:.1f}x — breakout confirmed")
+        elif vol_ratio >= 1.4:
+            score += 10; reasons.append(f"[A] Above-avg volume {vol_ratio:.1f}x")
+        elif vol_ratio >= 1.1:
+            score += 4;  reasons.append(f"[A] Slight volume pickup {vol_ratio:.1f}x")
+        else:
+            missing.append(f"[A] Low volume {vol_ratio:.1f}x — weak breakout")
+
+        # Supertrend UP — 15 pts
+        if supertrend == "UP":
+            score += 15; reasons.append("[A] Supertrend bullish")
+        else:
+            missing.append("[A] Supertrend not UP")
+
+        # VWAP + EMA alignment — 10 pts
+        if vwap_vote == "BUY" or ema_align == "BULLISH":
+            score += 10; reasons.append("[A] Price above VWAP / EMA aligned bullish")
+        else:
+            missing.append("[A] Below VWAP / EMA not aligned")
+
+        # ADX trend strength bonus — up to 5 pts extra
+        if adx_val >= 30:
+            score += 5; reasons.append(f"[A] Strong trend ADX {adx_val:.0f}")
+
+        # BUY vote bonus
+        if buy_votes >= 7:
+            score += 5; reasons.append(f"[A] {buy_votes}/12 indicators say BUY")
+
+        return max(0, min(100, score)), reasons, missing
+
+    def _score_strategy_B(self, stock: dict, ind: dict) -> tuple:
+        """
+        Strategy B — OVERSOLD REVERSAL
+        Looks for: RSI deeply oversold (<38) + Bollinger lower band +
+                   Stochastic oversold + potential bounce setup
+        Score: 0-100
+        """
+        score = 0
+        reasons = []
+        missing = []
+
+        rsi = ind.get("rsi", {}).get("value", 50)
         bb_pct = ind.get("bollinger", {}).get("pct_b", 0.5)
-        if bb_pct < 0.2:   score += 3; reasons.append(f"[A] Near Bollinger lower band")
-        elif bb_pct > 0.8: score -= 5; missing.append(f"[A] Near Bollinger upper band — risky")
+        stoch_k = ind.get("stochastic", {}).get("k", 50)
+        stoch_d = ind.get("stochastic", {}).get("d", 50)
+        macd_vote = ind.get("macd", {}).get("vote", "NEUTRAL")
+        vol_ratio = ind.get("volume", {}).get("ratio", 1.0)
+        vol_spike = ind.get("volume", {}).get("spike", False)
+        obv_trend = ind.get("obv", {}).get("trend", "NEUTRAL")
+        supertrend = ind.get("supertrend", {}).get("direction", "")
+        votes = stock.get("votes", {})
+        buy_votes = votes.get("BUY", 0)
 
-        return max(0, min(110, score)), reasons, missing
+        # RSI oversold — core signal — 35 pts
+        if rsi < 25:
+            score += 35; reasons.append(f"[B] RSI {rsi:.0f} — EXTREMELY oversold, high bounce potential")
+        elif rsi < 30:
+            score += 30; reasons.append(f"[B] RSI {rsi:.0f} — deeply oversold")
+        elif rsi < 38:
+            score += 22; reasons.append(f"[B] RSI {rsi:.0f} — oversold zone")
+        elif rsi < 45:
+            score += 8;  reasons.append(f"[B] RSI {rsi:.0f} — approaching oversold")
+        else:
+            missing.append(f"[B] RSI {rsi:.0f} — not oversold (need < 38)")
+
+        # Bollinger Band lower touch — 25 pts
+        if bb_pct <= 0.10:
+            score += 25; reasons.append(f"[B] At/below Bollinger lower band ({bb_pct:.0%}) — strong reversal zone")
+        elif bb_pct <= 0.20:
+            score += 18; reasons.append(f"[B] Near Bollinger lower band ({bb_pct:.0%})")
+        elif bb_pct <= 0.30:
+            score += 8;  reasons.append(f"[B] Approaching lower band ({bb_pct:.0%})")
+        else:
+            missing.append(f"[B] Not near lower Bollinger band ({bb_pct:.0%})")
+
+        # Stochastic oversold — 20 pts
+        if stoch_k is not None and stoch_d is not None:
+            if stoch_k < 20 and stoch_d < 20:
+                score += 20; reasons.append(f"[B] Stochastic deeply oversold K:{stoch_k:.0f} D:{stoch_d:.0f}")
+            elif stoch_k < 25:
+                score += 12; reasons.append(f"[B] Stochastic oversold K:{stoch_k:.0f}")
+            elif stoch_k < 35:
+                score += 5;  reasons.append(f"[B] Stochastic low K:{stoch_k:.0f}")
+            else:
+                missing.append(f"[B] Stochastic not oversold K:{stoch_k:.0f}")
+
+        # Volume — reversal needs volume — 15 pts
+        if vol_spike:
+            score += 15; reasons.append(f"[B] Volume spike — reversal candle forming")
+        elif vol_ratio >= 1.3:
+            score += 7;  reasons.append(f"[B] Elevated volume {vol_ratio:.1f}x")
+        else:
+            missing.append(f"[B] Low volume {vol_ratio:.1f}x — reversal unconfirmed")
+
+        # MACD starting to cross (early signal) — 5 pts bonus
+        if macd_vote == "BUY":
+            score += 5; reasons.append("[B] MACD starting bullish cross — reversal confirming")
+
+        # OBV divergence bonus — institutions accumulating
+        if obv_trend == "RISING":
+            score += 5; reasons.append("[B] OBV rising — smart money accumulating")
+
+        # Supertrend bonus (if flipping from DOWN to UP in oversold = strong)
+        if supertrend == "UP" and rsi < 40:
+            score += 5; reasons.append("[B] Supertrend flipped UP while oversold — strong reversal")
+
+        return max(0, min(100, score)), reasons, missing
+
+    def _score_strategy_C(self, stock: dict, ind: dict) -> tuple:
+        """
+        Strategy C — TREND RIDER
+        Looks for: Strong confirmed trend (ADX > 25) + all trend indicators aligned +
+                   Institutional participation (OBV + Volume) + Price above VWAP
+        Score: 0-100
+        """
+        score = 0
+        reasons = []
+        missing = []
+
+        rsi = ind.get("rsi", {}).get("value", 50)
+        adx_val = ind.get("adx", {}).get("adx", 0)
+        adx_trend = ind.get("adx", {}).get("trend_strength", "")
+        supertrend = ind.get("supertrend", {}).get("direction", "")
+        ema_align = ind.get("ema_crossover", {}).get("alignment", "NEUTRAL")
+        vwap_vote = ind.get("vwap", {}).get("vote", "NEUTRAL")
+        obv_trend = ind.get("obv", {}).get("trend", "NEUTRAL")
+        vol_ratio = ind.get("volume", {}).get("ratio", 1.0)
+        vol_spike = ind.get("volume", {}).get("spike", False)
+        macd_vote = ind.get("macd", {}).get("vote", "NEUTRAL")
+
+        # ADX — trend strength is THE core of this strategy — 30 pts
+        if adx_val >= 40:
+            score += 30; reasons.append(f"[C] ADX {adx_val:.0f} — VERY strong trend")
+        elif adx_val >= 30:
+            score += 22; reasons.append(f"[C] ADX {adx_val:.0f} — strong trend")
+        elif adx_val >= 25:
+            score += 14; reasons.append(f"[C] ADX {adx_val:.0f} — confirmed trend")
+        elif adx_val >= 20:
+            score += 5;  reasons.append(f"[C] ADX {adx_val:.0f} — developing trend")
+        else:
+            missing.append(f"[C] ADX {adx_val:.0f} — no clear trend (need > 25)")
+
+        # Supertrend + EMA both bullish — 25 pts
+        if supertrend == "UP" and ema_align == "BULLISH":
+            score += 25; reasons.append("[C] Supertrend UP + EMA perfectly aligned bullish")
+        elif supertrend == "UP":
+            score += 15; reasons.append("[C] Supertrend UP (EMA not fully aligned)")
+        elif ema_align == "BULLISH":
+            score += 10; reasons.append("[C] EMA aligned bullish")
+        else:
+            missing.append("[C] No trend alignment — Supertrend/EMA not bullish")
+
+        # OBV rising = institutional accumulation — 20 pts
+        if obv_trend == "RISING":
+            score += 20; reasons.append("[C] OBV rising — institutional accumulation confirmed")
+        elif obv_trend == "NEUTRAL":
+            score += 5;  reasons.append("[C] OBV neutral")
+        else:
+            missing.append("[C] OBV declining — smart money exiting")
+
+        # VWAP + RSI in healthy range — 15 pts
+        if vwap_vote == "BUY" and 45 <= rsi <= 68:
+            score += 15; reasons.append(f"[C] Above VWAP, RSI {rsi:.0f} — healthy trend")
+        elif vwap_vote == "BUY":
+            score += 8;  reasons.append(f"[C] Above VWAP, RSI {rsi:.0f}")
+        else:
+            missing.append(f"[C] Below VWAP or RSI {rsi:.0f} unfavorable")
+
+        # MACD confirms trend direction — 10 pts
+        if macd_vote == "BUY":
+            score += 10; reasons.append("[C] MACD confirms bullish trend")
+        else:
+            missing.append("[C] MACD not confirming trend")
+
+        # Volume confirms institutional trend — bonus
+        if vol_spike or vol_ratio >= 1.3:
+            score += 5; reasons.append(f"[C] Volume {vol_ratio:.1f}x confirms trend move")
+
+        return max(0, min(100, score)), reasons, missing
+
+    def _score_strategy_D(self, stock: dict, ind: dict, symbol: str) -> tuple:
+        """
+        Strategy D — NEWS CATALYST
+        Looks for: Stock-specific bullish news + Legendary investor consensus +
+                   Volume spike (news-driven) + Basic technical not bearish
+        Score: 0-100
+        """
+        score = 0
+        reasons = []
+        missing = []
+
+        rsi = ind.get("rsi", {}).get("value", 50)
+        macd_vote = ind.get("macd", {}).get("vote", "NEUTRAL")
+        vol_spike = ind.get("volume", {}).get("spike", False)
+        vol_ratio = ind.get("volume", {}).get("ratio", 1.0)
+        supertrend = ind.get("supertrend", {}).get("direction", "")
+
+        # ── News sentiment (stock-specific) — 40 pts ──
+        news_data = self._get_stock_news_sentiment(symbol)
+        news_sent = news_data.get("sentiment", "NEUTRAL")
+        is_specific = not news_data.get("market_level", True)
+
+        if is_specific and news_sent == "BULLISH":
+            bull_count = news_data.get("bullish", 1)
+            headlines = news_data.get("headlines", [])
+            pts = min(40, 25 + bull_count * 5)
+            score += pts
+            h = headlines[0][:60] if headlines else "bullish news"
+            reasons.append(f"[D] Stock-specific bullish news ({bull_count} articles): {h}")
+        elif not is_specific and news_sent == "BULLISH":
+            score += 12; reasons.append("[D] Bullish market-wide sentiment")
+        elif is_specific and news_sent == "BEARISH":
+            score -= 20; missing.append("[D] Bearish stock-specific news — avoid")
+        elif news_sent == "BEARISH":
+            score -= 8;  missing.append("[D] Bearish market sentiment")
+        else:
+            missing.append("[D] No significant news catalyst")
+
+        # ── Investor Perspectives (legendary investors agree) — 30 pts ──
+        try:
+            from investor_perspectives import analyze_through_investor_lenses
+            investor_data = analyze_through_investor_lenses(stock, ind)
+            bullish_count = investor_data.get("consensus", {}).get("bullish_count", 0)
+            key_insight = investor_data.get("consensus", {}).get("key_insight", "")
+
+            if bullish_count >= 5:
+                score += 30; reasons.append(f"[D] All 5 legendary investors bullish! {key_insight}")
+            elif bullish_count >= 4:
+                score += 22; reasons.append(f"[D] {bullish_count}/5 investors bullish: {key_insight}")
+            elif bullish_count >= 3:
+                score += 14; reasons.append(f"[D] {bullish_count}/5 investors bullish")
+            elif bullish_count >= 2:
+                score += 6;  reasons.append(f"[D] {bullish_count}/5 investors see potential")
+            else:
+                missing.append(f"[D] Only {bullish_count}/5 investors bullish")
+        except Exception:
+            missing.append("[D] Could not compute investor perspectives")
+
+        # ── Volume spike = news is moving the stock — 20 pts ──
+        if vol_spike:
+            score += 20; reasons.append(f"[D] Volume spike {vol_ratio:.1f}x — news is moving the stock!")
+        elif vol_ratio >= 1.5:
+            score += 10; reasons.append(f"[D] Elevated volume {vol_ratio:.1f}x on news")
+        elif vol_ratio >= 1.2:
+            score += 4;  reasons.append(f"[D] Slightly elevated volume {vol_ratio:.1f}x")
+        else:
+            missing.append(f"[D] Volume {vol_ratio:.1f}x — news not confirmed by volume")
+
+        # ── Basic technical gate — 10 pts ──
+        # Don't buy into overbought on news (gap-up trap)
+        if rsi <= 68 and macd_vote != "SELL":
+            score += 10; reasons.append(f"[D] Technical gate OK — RSI {rsi:.0f}, MACD not bearish")
+        elif rsi > 75:
+            score -= 10; missing.append(f"[D] RSI {rsi:.0f} overbought — news already priced in")
+
+        # Supertrend bonus
+        if supertrend == "UP":
+            score += 5; reasons.append("[D] Supertrend UP — news aligned with trend")
+
+        return max(0, min(100, score)), reasons, missing
 
     def _score_investor_perspectives(self, stock: dict, ind: dict) -> tuple:
-        """Strategy B: Investor perspectives score. Returns (bullish_count 0-5, reasons, missing, data)."""
+        """Legacy method — used for backward compat. Use _score_strategy_D instead."""
         reasons = []
         missing = []
         investor_data = {}

@@ -248,6 +248,73 @@ async def scrape_headlines() -> List[dict]:
     return all_news
 
 
+async def fetch_fii_dii_data() -> dict:
+    """Scrape FII/DII activity data from Moneycontrol."""
+    result = {
+        "fii_buy": 0, "fii_sell": 0, "fii_net": 0,
+        "dii_buy": 0, "dii_sell": 0, "dii_net": 0,
+        "source": "moneycontrol",
+        "date": datetime.now().strftime("%Y-%m-%d"),
+        "available": False,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            resp = await client.get(
+                "https://www.moneycontrol.com/stocks/marketstats/fii_dii_activity/index.php",
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+            # Try to parse FII/DII table
+            tables = soup.find_all("table")
+            for table in tables:
+                rows = table.find_all("tr")
+                for row in rows:
+                    cols = row.find_all("td")
+                    if len(cols) >= 4:
+                        label = cols[0].get_text(strip=True).upper()
+                        try:
+                            buy_val = float(cols[1].get_text(strip=True).replace(",", ""))
+                            sell_val = float(cols[2].get_text(strip=True).replace(",", ""))
+                            net_val = float(cols[3].get_text(strip=True).replace(",", ""))
+                        except (ValueError, IndexError):
+                            continue
+
+                        if "FII" in label or "FPI" in label:
+                            result["fii_buy"] = buy_val
+                            result["fii_sell"] = sell_val
+                            result["fii_net"] = net_val
+                            result["available"] = True
+                        elif "DII" in label:
+                            result["dii_buy"] = buy_val
+                            result["dii_sell"] = sell_val
+                            result["dii_net"] = net_val
+                            result["available"] = True
+    except Exception as e:
+        logger.warning(f"FII/DII scrape error: {e}")
+
+    # If scraping failed, try headlines for FII/DII info
+    if not result["available"]:
+        try:
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+                resp = await client.get(
+                    "https://www.moneycontrol.com/news/business/markets/",
+                    headers={"User-Agent": "Mozilla/5.0"},
+                )
+                soup = BeautifulSoup(resp.text, "html.parser")
+                headlines = soup.select("li.clearfix h2 a")
+                for h in headlines:
+                    text = h.get_text(strip=True).lower()
+                    if "fii" in text or "dii" in text or "fpi" in text:
+                        result["headline"] = h.get_text(strip=True)
+                        result["available"] = True
+                        break
+        except Exception:
+            pass
+
+    return result
+
+
 async def get_market_news() -> List[dict]:
     news = await fetch_news_api()
     if not news:

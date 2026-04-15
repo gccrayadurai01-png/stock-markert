@@ -230,6 +230,8 @@ export interface AutoTraderPosition {
   unrealized_pnl_pct: number;
   status: "OPEN" | "PARTIAL_EXIT" | "CLOSED";
   atr: number;
+  strategy_key?: string;
+  strategy_name?: string;
 }
 
 export interface AutoTraderPendingSignal {

@@ -92,10 +92,10 @@ export default function AutoTraderDashboard({ initialData }: Props) {
           <span className="text-2xl sm:text-3xl">🤖</span>
           <div>
             <h1 className="text-xl sm:text-2xl font-black text-foreground">AUTO TRADER</h1>
-            <p className="text-xs text-muted">Emotionless. Patient. Precise.</p>
+            <p className="text-xs text-muted">4 Independent Strategies — Any fires = Trade taken</p>
           </div>
           {data?.test_mode && (
-            <span className="text-[10px] bg-yellow/20 text-yellow px-2 py-1 rounded-full font-bold">TEST</span>
+            <span className="text-[10px] bg-yellow/20 text-yellow px-2 py-1 rounded-full font-bold">PAPER</span>
           )}
         </div>
 
@@ -113,33 +113,40 @@ export default function AutoTraderDashboard({ initialData }: Props) {
         </div>
       </div>
 
-      {/* Intelligence Status Bar */}
-      {data?.intelligence && (
-        <div className="bg-gradient-to-r from-accent/10 via-purple-500/10 to-green/10 rounded-xl border border-accent/30 px-3 py-2.5 flex items-center justify-between gap-2 overflow-x-auto">
-          <div className="flex items-center gap-4">
-            <span className="text-xs font-black text-accent uppercase">🧠 Intelligence</span>
-            <span className="text-[10px] px-2 py-0.5 rounded-full bg-green/20 text-green font-bold">
-              {data.intelligence.indicators_active} Indicators
-            </span>
-            <span className="text-[10px] px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-400 font-bold">
-              {data.intelligence.investor_perspectives} Investor Minds
-            </span>
-            <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
-              data.intelligence.ai_enabled ? "bg-yellow/20 text-yellow" : "bg-muted/20 text-muted"
-            }`}>
-              {data.intelligence.ai_enabled ? "🤖 AI Active" : "🤖 AI Off"}
-            </span>
-          </div>
-          <div className="flex items-center gap-3">
-            <span className={`text-[10px] font-bold ${
+      {/* 4 Strategy Status Bar */}
+      <div className="bg-card rounded-xl border border-border p-3">
+        <div className="flex items-center gap-2 mb-2">
+          <span className="text-[10px] font-black text-muted uppercase tracking-wider">Active Strategies</span>
+          <span className="text-[9px] bg-green/20 text-green px-1.5 py-0.5 rounded font-bold">ANY fires = Trade</span>
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          {[
+            { id: "A", name: "Momentum Breakout", emoji: "🚀", color: "text-green", bg: "bg-green/10 border-green/30" },
+            { id: "B", name: "Oversold Reversal",  emoji: "📉", color: "text-blue-400", bg: "bg-blue-500/10 border-blue-500/30" },
+            { id: "C", name: "Trend Rider",        emoji: "🏄", color: "text-yellow", bg: "bg-yellow/10 border-yellow/30" },
+            { id: "D", name: "News Catalyst",      emoji: "📰", color: "text-purple-400", bg: "bg-purple-500/10 border-purple-500/30" },
+          ].map((s) => (
+            <div key={s.id} className={`rounded-lg border px-3 py-2 ${s.bg}`}>
+              <div className="flex items-center gap-1.5">
+                <span className="text-sm">{s.emoji}</span>
+                <span className={`text-[10px] font-black ${s.color}`}>Strategy {s.id}</span>
+              </div>
+              <div className="text-[9px] text-muted mt-0.5">{s.name}</div>
+            </div>
+          ))}
+        </div>
+        {data?.intelligence && (
+          <div className="flex items-center gap-3 mt-2 pt-2 border-t border-border/50">
+            <span className="text-[9px] text-muted">📊 {data.intelligence.indicators_active} Indicators</span>
+            <span className="text-[9px] text-muted">🧠 {data.intelligence.investor_perspectives} Investor Lenses</span>
+            <span className={`text-[9px] font-bold ${
               data.intelligence.market_sentiment === "BULLISH" ? "text-green" :
               data.intelligence.market_sentiment === "BEARISH" ? "text-red" : "text-muted"
-            }`}>
-              📰 {data.intelligence.market_sentiment} ({data.intelligence.news_articles} articles)
-            </span>
+            }`}>📰 Market: {data.intelligence.market_sentiment}</span>
+            {data.intelligence.ai_enabled && <span className="text-[9px] text-yellow">🤖 AI Gate: ON</span>}
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
       {/* Status Cards */}
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2 sm:gap-3">
@@ -298,7 +305,21 @@ function PositionsTab({ positions }: { positions: AutoTraderPosition[] }) {
                 </div>
                 <div>
                   <div className="font-bold text-foreground">{p.name}</div>
-                  <div className="text-[10px] text-muted">{p.symbol.replace(".NS", "")}</div>
+                  <div className="flex items-center gap-1.5 mt-0.5">
+                    <span className="text-[10px] text-muted">{p.symbol.replace(".NS", "")}</span>
+                    {p.strategy_key && (
+                      <span className={`text-[9px] font-black px-1.5 py-0.5 rounded border ${
+                        p.strategy_key === "A" ? "bg-green/10 text-green border-green/30" :
+                        p.strategy_key === "B" ? "bg-blue-500/10 text-blue-400 border-blue-500/30" :
+                        p.strategy_key === "C" ? "bg-yellow/10 text-yellow border-yellow/30" :
+                        "bg-purple-500/10 text-purple-400 border-purple-500/30"
+                      }`}>
+                        {p.strategy_key === "A" ? "🚀 Momentum" :
+                         p.strategy_key === "B" ? "📉 Reversal" :
+                         p.strategy_key === "C" ? "🏄 Trend" : "📰 News"}
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
 
@@ -390,19 +411,35 @@ function WatchlistTab({ signals }: { signals: AutoTraderPendingSignal[] }) {
   return (
     <div className="space-y-3">
       {signals.map((s) => {
-        const pct = Math.min(100, (s.confluence_score / 75) * 100);
+        const threshold = (s as AutoTraderPendingSignal & { strategy_id?: string }).strategy_id === "B" ? 55 :
+                          (s as AutoTraderPendingSignal & { strategy_id?: string }).strategy_id === "D" ? 50 : 60;
+        const pct = Math.min(100, (s.confluence_score / threshold) * 100);
         return (
           <div key={s.symbol} className="bg-card rounded-xl border border-border p-4">
             <div className="flex items-center justify-between mb-2">
               <div>
-                <span className="font-bold text-foreground">{s.name}</span>
-                <span className="text-xs text-muted ml-2">₹{s.price.toLocaleString("en-IN")}</span>
+                <div className="flex items-center gap-2">
+                  <span className="font-bold text-foreground">{s.name}</span>
+                  {(s as AutoTraderPendingSignal & { strategy_id?: string; strategy_name?: string }).strategy_id && (
+                    <span className={`text-[9px] font-black px-1.5 py-0.5 rounded border ${
+                      (s as AutoTraderPendingSignal & { strategy_id?: string }).strategy_id === "A" ? "bg-green/10 text-green border-green/30" :
+                      (s as AutoTraderPendingSignal & { strategy_id?: string }).strategy_id === "B" ? "bg-blue-500/10 text-blue-400 border-blue-500/30" :
+                      (s as AutoTraderPendingSignal & { strategy_id?: string }).strategy_id === "C" ? "bg-yellow/10 text-yellow border-yellow/30" :
+                      "bg-purple-500/10 text-purple-400 border-purple-500/30"
+                    }`}>
+                      {(s as AutoTraderPendingSignal & { strategy_id?: string }).strategy_id === "A" ? "🚀 Momentum" :
+                       (s as AutoTraderPendingSignal & { strategy_id?: string }).strategy_id === "B" ? "📉 Reversal" :
+                       (s as AutoTraderPendingSignal & { strategy_id?: string }).strategy_id === "C" ? "🏄 Trend" : "📰 News"}
+                    </span>
+                  )}
+                </div>
+                <span className="text-xs text-muted">₹{s.price.toLocaleString("en-IN")}</span>
               </div>
               <div className="text-right">
-                <span className={`text-lg font-black ${s.confluence_score >= 70 ? "text-yellow" : "text-muted"}`}>
-                  {s.confluence_score}/110
+                <span className={`text-lg font-black ${s.confluence_score >= 50 ? "text-yellow" : "text-muted"}`}>
+                  {s.confluence_score}/100
                 </span>
-                <div className="text-[9px] text-muted">Need 75 to enter</div>
+                <div className="text-[9px] text-muted">Approaching threshold</div>
               </div>
             </div>
 

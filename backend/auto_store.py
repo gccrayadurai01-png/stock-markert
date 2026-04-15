@@ -37,20 +37,21 @@ DEFAULT_CONFIG = {
     "max_positions": 5,
     "risk_per_trade": 1.5,
     "max_portfolio_heat": 8.0,
-    "min_confluence": 60,
+    "min_confluence": 55,
     "trailing_sl_atr_multiplier": 1.5,
-    "scan_interval_seconds": 150,  # 2.5 minutes
+    "scan_interval_seconds": 150,
     "test_mode": True,
     "test_mode_start": None,
     "close_positions_time": "15:15",
     "no_new_trades_after": "15:00",
     "use_ai_confirmation": True,
-    # ── Multi-Strategy Settings ─────────────────────────────────────
-    # A = Technical Indicators, B = Investor Perspectives, C = News, D = SMC/ICT
-    "active_strategies": ["A", "B", "C"],   # Which strategies to use
-    "strategy_mode": "ALL_REQUIRED",         # ALL_REQUIRED or ANY_TRIGGERS
-    "smc_min_score": 60,                     # Min SMC score to count as bullish (D)
-    "smc_on_top_candidates_only": True,      # Only run SMC on indicator-positive stocks (saves API)
+    # ── 4 Independent Strategies ────────────────────────────────────
+    # A = Momentum Breakout  B = Oversold Reversal
+    # C = Trend Rider        D = News Catalyst
+    # ANY one firing = trade taken (no ALL_REQUIRED anymore)
+    "active_strategies": ["A", "B", "C", "D"],
+    "strategy_mode": "ANY_TRIGGERS",
+    "strategy_min_scores": {"A": 60, "B": 55, "C": 60, "D": 50},
 }
 
 
