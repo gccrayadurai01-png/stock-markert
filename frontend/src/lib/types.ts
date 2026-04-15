@@ -313,13 +313,14 @@ export interface StrategyPerformance {
   worst_pnl: number;
 }
 
+export type StrategyTradeLog = Array<{
+  symbol: string; strategy: string; pnl: number;
+  strategies_confirmed: string[]; scores: Record<string, number>;
+  date: string; timestamp: string;
+}>;
+
 export interface StrategyPerformanceMap {
   [key: string]: StrategyPerformance;  // "A", "B", "C", "D", "A+B", "A+B+C+D" etc.
-  _trade_log?: Array<{
-    symbol: string; strategy: string; pnl: number;
-    strategies_confirmed: string[]; scores: Record<string, number>;
-    date: string; timestamp: string;
-  }>;
 }
 
 export interface StrategyConfig {
