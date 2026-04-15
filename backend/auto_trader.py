@@ -160,26 +160,40 @@ class AutoTrader:
                     if not strategy_results:
                         continue
 
-                    # Find the best firing strategy for this stock
-                    best_id = None
-                    best_score = 0
-                    for sid, sres in strategy_results.items():
-                        if sres["fires"] and sres["score"] > best_score:
-                            best_id = sid
-                            best_score = sres["score"]
+                    # Collect ALL strategies that fire (for combo tracking)
+                    fired = sorted([sid for sid, r in strategy_results.items() if r["fires"]])
+                    all_scores = {sid: r["score"] for sid, r in strategy_results.items()}
 
-                    if best_id:
+                    if fired:
+                        # Combo key: "A", "B", "A+B", "A+B+C", etc.
+                        combo_key = "+".join(fired)
+
+                        # Best single strategy (highest score) drives entry logic
+                        best_id = max(fired, key=lambda sid: strategy_results[sid]["score"])
                         best = strategy_results[best_id]
-                        # Build entry analysis from winning strategy
+                        best_score = best["score"]
+
+                        # Merge reasons from ALL firing strategies
+                        all_reasons = []
+                        for sid in fired:
+                            all_reasons.extend(strategy_results[sid]["reasons"])
+
+                        # Combo name for display
+                        combo_name = " + ".join(
+                            strategy_results[sid]["name"] for sid in fired
+                        )
+                        combo_emoji = "".join(strategy_results[sid]["emoji"] for sid in fired)
+
                         entry_analysis = {
-                            "confluence": best["score"],
-                            "reasons": best["reasons"],
+                            "confluence": best_score,
+                            "reasons": all_reasons,
                             "missing": best["missing"],
                             "strategy_id": best_id,
-                            "strategy_name": best["name"],
-                            "strategy_emoji": best["emoji"],
-                            "strategies_confirmed": [best_id],
-                            "strategy_scores": {sid: r["score"] for sid, r in strategy_results.items()},
+                            "strategy_key": combo_key,      # e.g. "A+B"
+                            "strategy_name": combo_name,    # e.g. "Momentum + Reversal"
+                            "strategy_emoji": combo_emoji,
+                            "strategies_confirmed": fired,
+                            "strategy_scores": all_scores,
                         }
 
                         # AI confirmation for high-score trades (score >= 80)
@@ -195,11 +209,12 @@ class AutoTrader:
                                         "price": stock.get("price", 0),
                                         "confluence_score": best_score,
                                         "strategy_id": best_id,
-                                        "strategy_name": best["name"],
+                                        "strategy_key": combo_key,
+                                        "strategy_name": combo_name,
                                         "missing": [f"AI rejected: {ai_reasoning}"],
-                                        "met_conditions": best["reasons"],
-                                        "strategy_scores": entry_analysis["strategy_scores"],
-                                        "strategies_confirmed": [best_id],
+                                        "met_conditions": all_reasons[:4],
+                                        "strategy_scores": all_scores,
+                                        "strategies_confirmed": fired,
                                     })
                                     continue
                                 ai_reasoning = ai_result.get("reasoning", "Approved")
@@ -219,22 +234,26 @@ class AutoTrader:
                                 "stop_loss": trade["stop_loss"],
                                 "target_1": trade["target_1"],
                                 "shares": trade["shares"],
-                                "reasoning": best["reasons"],
+                                "reasoning": all_reasons,
                                 "ai_confirmation": ai_reasoning,
-                                "strategy_key": best_id,
-                                "strategy_name": best["name"],
-                                "strategy_scores": entry_analysis["strategy_scores"],
-                                "strategies_confirmed": [best_id],
+                                "strategy_key": combo_key,
+                                "strategy_name": combo_name,
+                                "strategy_scores": all_scores,
+                                "strategies_confirmed": fired,
                                 "indicator_snapshot": self._snapshot(stock),
                             })
                             logger.info(
-                                f"🤖{best['emoji']} TRADE: {best['name']} fired on {stock['symbol']} "
-                                f"@ ₹{stock.get('price', 0):.0f} | Score: {best_score}/100"
+                                f"🤖{combo_emoji} TRADE [{combo_key}] {combo_name} fired on "
+                                f"{stock['symbol']} @ ₹{stock.get('price',0):.0f} | Score: {best_score}/100"
                             )
 
                     else:
-                        # Check if any strategy is getting close (watchlist)
-                        best_near = max(strategy_results.items(), key=lambda x: x[1]["score"], default=(None, {"score": 0}))
+                        # No strategy fires — check watchlist (getting close)
+                        best_near = max(
+                            strategy_results.items(),
+                            key=lambda x: x[1]["score"],
+                            default=(None, {"score": 0})
+                        )
                         near_id, near_res = best_near
                         if near_id and near_res["score"] >= 35:
                             pending_signals.append({
@@ -243,10 +262,11 @@ class AutoTrader:
                                 "price": stock.get("price", 0),
                                 "confluence_score": near_res["score"],
                                 "strategy_id": near_id,
+                                "strategy_key": near_id,
                                 "strategy_name": near_res["name"],
                                 "missing": near_res["missing"][:3],
                                 "met_conditions": near_res["reasons"][:4],
-                                "strategy_scores": {sid: r["score"] for sid, r in strategy_results.items()},
+                                "strategy_scores": all_scores,
                                 "strategies_confirmed": [],
                             })
 
@@ -417,10 +437,11 @@ Respond ONLY with JSON: {{"confirmed": true/false, "reasoning": "one sentence wh
     # ─────────────────────────────────────────────────────────────────────
 
     STRATEGY_META = {
-        "A": {"name": "Momentum Breakout",  "emoji": "🚀", "min_score": 60, "color": "green"},
-        "B": {"name": "Oversold Reversal",  "emoji": "📉", "min_score": 55, "color": "blue"},
-        "C": {"name": "Trend Rider",        "emoji": "🏄", "min_score": 60, "color": "yellow"},
-        "D": {"name": "News Catalyst",      "emoji": "📰", "min_score": 50, "color": "purple"},
+        "A": {"name": "Momentum Breakout",  "emoji": "🚀", "min_score": 45, "color": "green"},
+        "B": {"name": "Oversold Reversal",  "emoji": "📉", "min_score": 40, "color": "blue"},
+        "C": {"name": "Trend Rider",        "emoji": "🏄", "min_score": 45, "color": "yellow"},
+        "D": {"name": "News Catalyst",      "emoji": "📰", "min_score": 35, "color": "purple"},
+        "E": {"name": "SMC / ICT",          "emoji": "🧠", "min_score": 50, "color": "red"},
     }
 
     async def _evaluate_all_strategies(self, stock: dict) -> Optional[dict]:
@@ -440,33 +461,71 @@ Respond ONLY with JSON: {{"confirmed": true/false, "reasoning": "one sentence wh
                 return None
 
         active = self.config.get("active_strategies", ["A", "B", "C", "D"])
+        # Dynamic min scores — read from config, fall back to STRATEGY_META defaults
+        min_scores = self.config.get("strategy_min_scores", {})
         results = {}
 
         if "A" in active:
             score, reasons, missing = self._score_strategy_A(stock, ind)
-            fires = score >= self.STRATEGY_META["A"]["min_score"]
+            threshold = min_scores.get("A", self.STRATEGY_META["A"]["min_score"])
+            fires = score >= threshold
             results["A"] = {"score": score, "fires": fires, "reasons": reasons, "missing": missing,
-                            "name": "Momentum Breakout", "emoji": "🚀"}
+                            "name": "Momentum Breakout", "emoji": "🚀", "threshold": threshold}
 
         if "B" in active:
             score, reasons, missing = self._score_strategy_B(stock, ind)
-            fires = score >= self.STRATEGY_META["B"]["min_score"]
+            threshold = min_scores.get("B", self.STRATEGY_META["B"]["min_score"])
+            fires = score >= threshold
             results["B"] = {"score": score, "fires": fires, "reasons": reasons, "missing": missing,
-                            "name": "Oversold Reversal", "emoji": "📉"}
+                            "name": "Oversold Reversal", "emoji": "📉", "threshold": threshold}
 
         if "C" in active:
             score, reasons, missing = self._score_strategy_C(stock, ind)
-            fires = score >= self.STRATEGY_META["C"]["min_score"]
+            threshold = min_scores.get("C", self.STRATEGY_META["C"]["min_score"])
+            fires = score >= threshold
             results["C"] = {"score": score, "fires": fires, "reasons": reasons, "missing": missing,
-                            "name": "Trend Rider", "emoji": "🏄"}
+                            "name": "Trend Rider", "emoji": "🏄", "threshold": threshold}
 
         if "D" in active:
             score, reasons, missing = self._score_strategy_D(stock, ind, symbol)
-            fires = score >= self.STRATEGY_META["D"]["min_score"]
+            threshold = min_scores.get("D", self.STRATEGY_META["D"]["min_score"])
+            fires = score >= threshold
             results["D"] = {"score": score, "fires": fires, "reasons": reasons, "missing": missing,
-                            "name": "News Catalyst", "emoji": "📰"}
+                            "name": "News Catalyst", "emoji": "📰", "threshold": threshold}
+
+        if "E" in active:
+            score, reasons, missing = await self._score_strategy_E(symbol, stock.get("price", 0))
+            threshold = min_scores.get("E", self.STRATEGY_META["E"]["min_score"])
+            fires = score >= threshold
+            results["E"] = {"score": score, "fires": fires, "reasons": reasons, "missing": missing,
+                            "name": "SMC / ICT", "emoji": "🧠", "threshold": threshold}
 
         return results if results else None
+
+    async def _score_strategy_E(self, symbol: str, current_price: float) -> tuple:
+        """
+        Strategy E — SMC / ICT (Smart Money Concepts)
+        Looks for: Bullish market structure (HH+HL) + Price at Order Block +
+                   Fair Value Gap pull-back + Discount zone + BOS/CHoCH signal
+        Uses 15-minute candles for intraday precision.
+        Score: 0-100
+        """
+        try:
+            from smc_engine import analyze_smc
+            loop = asyncio.get_event_loop()
+            smc = await loop.run_in_executor(executor, lambda: analyze_smc(symbol, current_price))
+        except Exception as e:
+            return 0, [], [f"[E] SMC data unavailable: {e}"]
+
+        if not smc.get("available", True) or smc.get("smc_score", 0) == 0:
+            if not smc.get("available"):
+                return 0, [], ["[E] Not enough 15m candle data for SMC"]
+
+        raw_score = smc.get("smc_score", 0)
+        raw_reasons = [f"[E] {r}" for r in smc.get("reasons", [])]
+        raw_missing = [f"[E] {m}" for m in smc.get("missing", [])]
+
+        return max(0, min(100, raw_score)), raw_reasons, raw_missing
 
     def _score_strategy_A(self, stock: dict, ind: dict) -> tuple:
         """
@@ -1496,10 +1555,21 @@ Respond ONLY with JSON (no markdown):
                 "indicators_active": 12,
                 "investor_perspectives": 5,
             },
-            # Multi-strategy status
+            # Strategy config + live performance
             "strategy_config": {
-                "active_strategies": self.config.get("active_strategies", ["A", "B", "C"]),
-                "strategy_mode": self.config.get("strategy_mode", "ALL_REQUIRED"),
-                "smc_min_score": self.config.get("smc_min_score", 60),
+                "active_strategies": self.config.get("active_strategies", ["A", "B", "C", "D", "E"]),
+                "strategy_mode": "ANY_TRIGGERS",
+                "strategy_min_scores": self.config.get("strategy_min_scores", {}),
             },
+            "strategy_performance": self._get_strategy_performance_summary(),
         }
+
+    def _get_strategy_performance_summary(self) -> dict:
+        """Return performance stats for each strategy and combo."""
+        try:
+            from auto_store import get_strategy_performance
+            perf = get_strategy_performance()
+            # Remove internal _trade_log key
+            return {k: v for k, v in perf.items() if not k.startswith("_")}
+        except Exception:
+            return {}

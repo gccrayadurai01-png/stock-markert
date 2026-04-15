@@ -22,7 +22,7 @@ interface Props {
 export default function AutoTraderDashboard({ initialData }: Props) {
   const [data, setData] = useState<AutoTraderData | null>(initialData ?? null);
   const [journal, setJournal] = useState<AutoTraderJournalEntry[]>([]);
-  const [tab, setTab] = useState<"positions" | "watchlist" | "journal" | "strategies" | "summary" | "settings">("positions");
+  const [tab, setTab] = useState<"positions" | "watchlist" | "journal" | "strategies" | "performance" | "summary" | "settings">("positions");
   const [loading, setLoading] = useState(false);
   const [toggling, setToggling] = useState(false);
   const [scanning, setScanning] = useState(false);
@@ -113,39 +113,46 @@ export default function AutoTraderDashboard({ initialData }: Props) {
         </div>
       </div>
 
-      {/* 4 Strategy Status Bar */}
+      {/* 5 Strategy Status Bar */}
       <div className="bg-card rounded-xl border border-border p-3">
-        <div className="flex items-center gap-2 mb-2">
-          <span className="text-[10px] font-black text-muted uppercase tracking-wider">Active Strategies</span>
-          <span className="text-[9px] bg-green/20 text-green px-1.5 py-0.5 rounded font-bold">ANY fires = Trade</span>
-        </div>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-          {[
-            { id: "A", name: "Momentum Breakout", emoji: "🚀", color: "text-green", bg: "bg-green/10 border-green/30" },
-            { id: "B", name: "Oversold Reversal",  emoji: "📉", color: "text-blue-400", bg: "bg-blue-500/10 border-blue-500/30" },
-            { id: "C", name: "Trend Rider",        emoji: "🏄", color: "text-yellow", bg: "bg-yellow/10 border-yellow/30" },
-            { id: "D", name: "News Catalyst",      emoji: "📰", color: "text-purple-400", bg: "bg-purple-500/10 border-purple-500/30" },
-          ].map((s) => (
-            <div key={s.id} className={`rounded-lg border px-3 py-2 ${s.bg}`}>
-              <div className="flex items-center gap-1.5">
-                <span className="text-sm">{s.emoji}</span>
-                <span className={`text-[10px] font-black ${s.color}`}>Strategy {s.id}</span>
-              </div>
-              <div className="text-[9px] text-muted mt-0.5">{s.name}</div>
-            </div>
-          ))}
-        </div>
-        {data?.intelligence && (
-          <div className="flex items-center gap-3 mt-2 pt-2 border-t border-border/50">
-            <span className="text-[9px] text-muted">📊 {data.intelligence.indicators_active} Indicators</span>
-            <span className="text-[9px] text-muted">🧠 {data.intelligence.investor_perspectives} Investor Lenses</span>
+        <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] font-black text-muted uppercase tracking-wider">5 Independent Strategies</span>
+            <span className="text-[9px] bg-green/20 text-green px-1.5 py-0.5 rounded font-bold">ANY fires = Trade</span>
+          </div>
+          {data?.intelligence && (
             <span className={`text-[9px] font-bold ${
               data.intelligence.market_sentiment === "BULLISH" ? "text-green" :
               data.intelligence.market_sentiment === "BEARISH" ? "text-red" : "text-muted"
-            }`}>📰 Market: {data.intelligence.market_sentiment}</span>
-            {data.intelligence.ai_enabled && <span className="text-[9px] text-yellow">🤖 AI Gate: ON</span>}
-          </div>
-        )}
+            }`}>📰 {data.intelligence.market_sentiment}</span>
+          )}
+        </div>
+        <div className="grid grid-cols-3 sm:grid-cols-5 gap-1.5">
+          {[
+            { id: "A", name: "Momentum",  emoji: "🚀", color: "text-green",      bg: "bg-green/10 border-green/30",           min: 45 },
+            { id: "B", name: "Reversal",  emoji: "📉", color: "text-blue-400",   bg: "bg-blue-500/10 border-blue-500/30",     min: 40 },
+            { id: "C", name: "Trend",     emoji: "🏄", color: "text-yellow",     bg: "bg-yellow/10 border-yellow/30",         min: 45 },
+            { id: "D", name: "News",      emoji: "📰", color: "text-purple-400", bg: "bg-purple-500/10 border-purple-500/30", min: 35 },
+            { id: "E", name: "SMC/ICT",   emoji: "🧠", color: "text-red",        bg: "bg-red/10 border-red/30",               min: 45 },
+          ].map((s) => {
+            const perf = (data as AutoTraderData & { strategy_performance?: Record<string, { trades: number; win_rate: number; pnl: number }> })?.strategy_performance?.[s.id];
+            return (
+              <div key={s.id} className={`rounded-lg border px-2 py-1.5 ${s.bg}`}>
+                <div className="flex items-center gap-1">
+                  <span className="text-xs">{s.emoji}</span>
+                  <span className={`text-[9px] font-black ${s.color}`}>{s.id}</span>
+                </div>
+                <div className="text-[8px] text-muted">{s.name}</div>
+                <div className="text-[8px] text-muted/70">min: {s.min}</div>
+                {perf && perf.trades > 0 && (
+                  <div className={`text-[8px] font-bold mt-0.5 ${perf.pnl >= 0 ? "text-green" : "text-red"}`}>
+                    {perf.win_rate}% • {perf.trades}T
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
       </div>
 
       {/* Status Cards */}
@@ -215,7 +222,7 @@ export default function AutoTraderDashboard({ initialData }: Props) {
 
       {/* Tabs */}
       <div className="flex gap-1 border-b border-border pb-1 overflow-x-auto">
-        {(["positions", "watchlist", "journal", "strategies", "summary", "settings"] as const).map((t) => (
+        {(["positions", "watchlist", "journal", "performance", "strategies", "settings"] as const).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -225,22 +232,22 @@ export default function AutoTraderDashboard({ initialData }: Props) {
                 : "text-muted hover:text-foreground"
             }`}
           >
-            {t === "positions"   && `📊 Positions (${positions.length})`}
+            {t === "positions"    && `📊 Positions (${positions.length})`}
             {t === "watchlist"   && `👁️ Watchlist (${pending.length})`}
             {t === "journal"     && "📝 Journal"}
+            {t === "performance" && "🏆 Performance"}
             {t === "strategies"  && "🧩 Strategies"}
-            {t === "summary"     && "📋 Daily Summary"}
             {t === "settings"    && "⚙️ Settings"}
           </button>
         ))}
       </div>
 
       {/* Tab Content */}
-      {tab === "positions"   && <PositionsTab positions={positions} />}
+      {tab === "positions"    && <PositionsTab positions={positions} />}
       {tab === "watchlist"   && <WatchlistTab signals={pending} />}
       {tab === "journal"     && <JournalTab entries={journal} onRefresh={fetchJournal} />}
+      {tab === "performance" && <PerformanceTab data={data} />}
       {tab === "strategies"  && <StrategiesTab initialConfig={data?.strategy_config} />}
-      {tab === "summary"     && <DailySummaryTab />}
       {tab === "settings"    && <SettingsTab onSave={fetchStatus} />}
 
       {/* Last scan */}
@@ -1401,9 +1408,43 @@ function SettingsTab({ onSave }: { onSave: () => void }) {
         </label>
       </div>
 
+      {/* Per-Strategy Min Scores */}
+      <div className="space-y-1">
+        <div className="text-[10px] font-bold text-accent uppercase">Strategy Min Scores (Dynamic)</div>
+        <div className="text-[9px] text-muted mb-2">Lower = more trades. Each strategy fires independently when it hits its threshold.</div>
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+          {[
+            { id: "A", name: "🚀 Momentum",  key: "A" },
+            { id: "B", name: "📉 Reversal",  key: "B" },
+            { id: "C", name: "🏄 Trend",     key: "C" },
+            { id: "D", name: "📰 News",       key: "D" },
+            { id: "E", name: "🧠 SMC/ICT",   key: "E" },
+          ].map((s) => {
+            const scores = (config.strategy_min_scores as unknown as Record<string, number>) ?? {};
+            const val = scores[s.key] ?? (s.key === "B" ? 40 : s.key === "D" ? 35 : 45);
+            return (
+              <div key={s.id}>
+                <label className="text-[9px] text-muted font-semibold block mb-1">{s.name}</label>
+                <input
+                  type="number"
+                  min={10} max={100}
+                  value={val}
+                  onChange={(e) => {
+                    const scores2 = { ...((config.strategy_min_scores as unknown as Record<string, number>) ?? {}) };
+                    scores2[s.key] = Number(e.target.value);
+                    setConfig({ ...config, strategy_min_scores: scores2 as unknown as number });
+                  }}
+                  className="w-full bg-background text-foreground text-xs px-2 py-1.5 rounded border border-border focus:border-accent outline-none"
+                />
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
       <div className="bg-yellow/10 border border-yellow/30 rounded-lg p-3 text-xs text-yellow">
-        <strong>Tip:</strong> Lower Min Confluence (45–60) to see more trades. Use 75+ for strict real trading.
-        Capital change is applied immediately to the portfolio.
+        <strong>Tip:</strong> Set 30–45 to test many trades. Set 60–75 for strict real trading.
+        Capital change applies immediately to portfolio.
       </div>
 
       <button
@@ -1431,6 +1472,111 @@ function SettingInput({
         onChange={(e) => onChange(e.target.value)}
         className="w-full bg-background text-foreground text-xs px-3 py-2 rounded border border-border focus:border-accent outline-none"
       />
+    </div>
+  );
+}
+
+// ── Performance Tab ───────────────────────────────────────────────────
+
+type StratPerf = { trades: number; wins: number; losses: number; win_rate: number; pnl: number; avg_win: number; avg_loss: number; best_pnl: number; worst_pnl: number };
+
+const STRAT_INFO: Record<string, { name: string; emoji: string; color: string; desc: string }> = {
+  A: { name: "Momentum",  emoji: "🚀", color: "text-green",      desc: "RSI building + MACD BUY + Volume spike" },
+  B: { name: "Reversal",  emoji: "📉", color: "text-blue-400",   desc: "RSI < 38 + Bollinger lower band" },
+  C: { name: "Trend",     emoji: "🏄", color: "text-yellow",     desc: "ADX > 25 + Supertrend + EMA aligned" },
+  D: { name: "News",      emoji: "📰", color: "text-purple-400", desc: "Bullish news + Investor consensus" },
+  E: { name: "SMC/ICT",   emoji: "🧠", color: "text-red",        desc: "Order Blocks + FVG + BOS/CHoCH" },
+};
+
+function getComboInfo(key: string) {
+  const parts = key.split("+");
+  if (parts.length === 1) return STRAT_INFO[key] ?? { name: key, emoji: "🔹", color: "text-muted", desc: "" };
+  const emojis = parts.map(p => STRAT_INFO[p]?.emoji ?? p).join("");
+  const names  = parts.map(p => STRAT_INFO[p]?.name  ?? p).join("+");
+  return { name: names, emoji: emojis, color: "text-accent", desc: `Combination: ${key}` };
+}
+
+function PerformanceTab({ data }: { data: AutoTraderData | null }) {
+  const perf = (data as (AutoTraderData & { strategy_performance?: Record<string, StratPerf> }) | null)?.strategy_performance ?? {};
+  const entries = Object.entries(perf).filter(([k]) => !k.startsWith("_")).sort((a, b) => b[1].pnl - a[1].pnl);
+
+  if (!entries.length) {
+    return (
+      <div className="bg-card rounded-xl border border-border p-8 text-center space-y-2">
+        <span className="text-3xl block">🏆</span>
+        <p className="text-sm font-bold text-muted">No trades recorded yet</p>
+        <p className="text-xs text-muted">Once trades close, strategy performance will appear here.<br/>
+          Combos like A+B, A+C, B+E etc. tracked automatically.</p>
+        <div className="mt-4 grid grid-cols-1 sm:grid-cols-5 gap-2">
+          {["A","B","C","D","E"].map(id => {
+            const info = STRAT_INFO[id];
+            return (
+              <div key={id} className="bg-background rounded-lg p-2 text-center">
+                <div className="text-lg">{info.emoji}</div>
+                <div className={`text-[10px] font-black ${info.color}`}>{id} — {info.name}</div>
+                <div className="text-[8px] text-muted mt-0.5">{info.desc}</div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
+  const best = entries[0];
+  const bestInfo = getComboInfo(best[0]);
+
+  return (
+    <div className="space-y-4">
+      {/* Best strategy banner */}
+      <div className="bg-gradient-to-r from-green/10 to-accent/10 border border-green/30 rounded-xl p-4 flex items-center gap-3">
+        <span className="text-2xl">{bestInfo.emoji}</span>
+        <div>
+          <div className="text-xs text-muted uppercase font-bold">Best Performing Strategy</div>
+          <div className="font-black text-foreground">{bestInfo.name}</div>
+          <div className="text-xs text-green">₹{best[1].pnl.toLocaleString("en-IN")} P&L • {best[1].win_rate}% Win Rate • {best[1].trades} trades</div>
+        </div>
+      </div>
+
+      {/* All strategies table */}
+      <div className="bg-card rounded-xl border border-border overflow-hidden">
+        <div className="grid grid-cols-6 px-4 py-2 bg-background text-[9px] text-muted font-bold uppercase">
+          <div className="col-span-2">Strategy</div>
+          <div className="text-center">Trades</div>
+          <div className="text-center">Win%</div>
+          <div className="text-center">Avg Win</div>
+          <div className="text-center">P&L</div>
+        </div>
+        {entries.map(([key, s]) => {
+          const info = getComboInfo(key);
+          const isCombo = key.includes("+");
+          return (
+            <div key={key} className={`grid grid-cols-6 px-4 py-2.5 border-t border-border/50 items-center ${isCombo ? "bg-accent/5" : ""}`}>
+              <div className="col-span-2 flex items-center gap-2">
+                <span className="text-sm">{info.emoji}</span>
+                <div>
+                  <div className={`text-[10px] font-black ${info.color}`}>
+                    {isCombo ? `Combo ${key}` : `Strategy ${key}`}
+                  </div>
+                  <div className="text-[8px] text-muted">{info.name}</div>
+                </div>
+              </div>
+              <div className="text-center text-xs font-bold text-foreground">{s.trades}</div>
+              <div className={`text-center text-xs font-bold ${s.win_rate >= 60 ? "text-green" : s.win_rate >= 40 ? "text-yellow" : "text-red"}`}>
+                {s.win_rate}%
+              </div>
+              <div className="text-center text-xs text-green">₹{s.avg_win?.toLocaleString("en-IN") ?? "—"}</div>
+              <div className={`text-center text-xs font-bold ${s.pnl >= 0 ? "text-green" : "text-red"}`}>
+                ₹{s.pnl.toLocaleString("en-IN")}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="text-center text-[9px] text-muted">
+        Combos (e.g. A+B) = both strategies fired on same trade. More combos appear as trades accumulate.
+      </div>
     </div>
   );
 }
