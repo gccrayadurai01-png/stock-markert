@@ -257,6 +257,9 @@ def analyze_coin(symbol: str) -> Optional[dict]:
 
     # Recompute ATR/SL/TP with crypto-appropriate precision (full_analysis rounds to 2 dp)
     atr_raw = calc_atr(ohlcv["highs"], ohlcv["lows"], ohlcv["closes"])
+    # Fallback: if ATR is 0 or suspiciously tiny, use 1.5% of price as minimum
+    if not atr_raw or atr_raw < current_raw * 0.0015:
+        atr_raw = current_raw * 0.015
     # Crypto is more volatile — use 2× ATR for SL, 3×/5× for targets
     sl_dist = atr_raw * 2.0
     if ta["signal"] in ("BUY", "STRONG_BUY"):
