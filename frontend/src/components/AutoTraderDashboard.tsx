@@ -22,10 +22,15 @@ interface Props {
 export default function AutoTraderDashboard({ initialData }: Props) {
   const [data, setData] = useState<AutoTraderData | null>(initialData ?? null);
   const [journal, setJournal] = useState<AutoTraderJournalEntry[]>([]);
-  const [tab, setTab] = useState<"positions" | "watchlist" | "journal" | "strategies" | "performance" | "summary" | "settings">("positions");
+  const [tab, setTab] = useState<"positions" | "watchlist" | "journal" | "strategies" | "performance" | "summary" | "settings" | "mytrades" | "pennystocks">("positions");
+  const [prefillTrade, setPrefillTrade] = useState<{ symbol: string; price: number } | null>(null);
   const [loading, setLoading] = useState(false);
   const [toggling, setToggling] = useState(false);
   const [scanning, setScanning] = useState(false);
+  const [nextScanIn, setNextScanIn] = useState<number | null>(null);
+  const [selectedStrategy, setSelectedStrategy] = useState<string | null>(null);
+  const [strategyTrades, setStrategyTrades] = useState<AutoTraderJournalEntry[]>([]);
+  const [loadingStratTrades, setLoadingStratTrades] = useState(false);
 
   // Poll auto trader status every 10 seconds
   useEffect(() => {
@@ -33,6 +38,24 @@ export default function AutoTraderDashboard({ initialData }: Props) {
     const interval = setInterval(fetchStatus, 10000);
     return () => clearInterval(interval);
   }, []);
+
+  // Live countdown — tick every second based on last_scan + scan_interval
+  useEffect(() => {
+    const tick = () => {
+      if (!data?.last_scan || !data?.running) {
+        setNextScanIn(null);
+        return;
+      }
+      const interval = data.scan_interval_seconds ?? 120;
+      const lastScanMs = new Date(data.last_scan).getTime();
+      const nextMs = lastScanMs + interval * 1000;
+      const remaining = Math.max(0, Math.round((nextMs - Date.now()) / 1000));
+      setNextScanIn(remaining);
+    };
+    tick();
+    const t = setInterval(tick, 1000);
+    return () => clearInterval(t);
+  }, [data?.last_scan, data?.running, data?.scan_interval_seconds]);
 
   async function fetchStatus() {
     try {
@@ -74,6 +97,22 @@ export default function AutoTraderDashboard({ initialData }: Props) {
     setScanning(false);
   }
 
+  async function handleStrategyClick(id: string) {
+    if (selectedStrategy === id) {
+      setSelectedStrategy(null);
+      setStrategyTrades([]);
+      return;
+    }
+    setSelectedStrategy(id);
+    setLoadingStratTrades(true);
+    try {
+      const res = await fetch(`${API}/api/auto-trader/journal/by-strategy/${encodeURIComponent(id)}`);
+      const d = await res.json();
+      setStrategyTrades(Array.isArray(d) ? d : []);
+    } catch { /* ignore */ }
+    setLoadingStratTrades(false);
+  }
+
   useEffect(() => {
     if (tab === "journal") fetchJournal();
   }, [tab]);
@@ -92,10 +131,35 @@ export default function AutoTraderDashboard({ initialData }: Props) {
           <span className="text-2xl sm:text-3xl">🤖</span>
           <div>
             <h1 className="text-xl sm:text-2xl font-black text-foreground">AUTO TRADER</h1>
-            <p className="text-xs text-muted">4 Independent Strategies — Any fires = Trade taken</p>
+            <p className="text-xs text-muted">5 Independent Strategies — Any fires = Trade taken</p>
           </div>
           {data?.test_mode && (
             <span className="text-[10px] bg-yellow/20 text-yellow px-2 py-1 rounded-full font-bold">PAPER</span>
+          )}
+          {/* Next scan countdown */}
+          {data?.last_scan && (
+            <div className="flex items-center gap-1.5 bg-card border border-border rounded-lg px-2.5 py-1">
+              <span className="text-[10px] text-muted font-bold uppercase tracking-wider">
+                {data.running ? "Next scan" : "Last scan"}
+              </span>
+              <span className={`text-xs font-black tabular-nums ${
+                !data.running ? "text-muted" :
+                nextScanIn === 0 ? "text-yellow animate-pulse" :
+                (nextScanIn ?? 999) <= 15 ? "text-green animate-pulse" : "text-accent"
+              }`}>
+                {!data.running
+                  ? new Date(data.last_scan).toLocaleTimeString("en-IN", {hour: "2-digit", minute: "2-digit"})
+                  : nextScanIn === 0 || nextScanIn === null
+                  ? "SCANNING..."
+                  : nextScanIn < 60
+                  ? `${nextScanIn}s`
+                  : `${Math.floor(nextScanIn / 60)}m ${nextScanIn % 60}s`
+                }
+              </span>
+            </div>
+          )}
+          {data?.running && data?.scan_count > 0 && (
+            <span className="text-[10px] text-muted">Scan #{data.scan_count}</span>
           )}
         </div>
 
@@ -136,11 +200,17 @@ export default function AutoTraderDashboard({ initialData }: Props) {
             { id: "E", name: "SMC/ICT",   emoji: "🧠", color: "text-red",        bg: "bg-red/10 border-red/30",               min: 45 },
           ].map((s) => {
             const perf = (data as AutoTraderData & { strategy_performance?: Record<string, { trades: number; win_rate: number; pnl: number }> })?.strategy_performance?.[s.id];
+            const isSelected = selectedStrategy === s.id;
             return (
-              <div key={s.id} className={`rounded-lg border px-2 py-1.5 ${s.bg}`}>
+              <button
+                key={s.id}
+                onClick={() => handleStrategyClick(s.id)}
+                className={`rounded-lg border px-2 py-1.5 text-left transition-all cursor-pointer hover:opacity-80 ${s.bg} ${isSelected ? "ring-2 ring-offset-1 ring-offset-card ring-white/30" : ""}`}
+              >
                 <div className="flex items-center gap-1">
                   <span className="text-xs">{s.emoji}</span>
                   <span className={`text-[9px] font-black ${s.color}`}>{s.id}</span>
+                  {isSelected && <span className="text-[8px] text-white/60 ml-auto">▲</span>}
                 </div>
                 <div className="text-[8px] text-muted">{s.name}</div>
                 <div className="text-[8px] text-muted/70">min: {s.min}</div>
@@ -149,10 +219,19 @@ export default function AutoTraderDashboard({ initialData }: Props) {
                     {perf.win_rate}% • {perf.trades}T
                   </div>
                 )}
-              </div>
+              </button>
             );
           })}
         </div>
+        {/* Strategy Detail Panel */}
+        {selectedStrategy && (
+          <StrategyDetailPanel
+            strategyId={selectedStrategy}
+            trades={strategyTrades}
+            loading={loadingStratTrades}
+            perfData={(data as AutoTraderData & { strategy_performance?: Record<string, { trades: number; wins: number; losses: number; win_rate: number; pnl: number }> })?.strategy_performance?.[selectedStrategy]}
+          />
+        )}
       </div>
 
       {/* Status Cards */}
@@ -222,7 +301,7 @@ export default function AutoTraderDashboard({ initialData }: Props) {
 
       {/* Tabs */}
       <div className="flex gap-1 border-b border-border pb-1 overflow-x-auto">
-        {(["positions", "watchlist", "journal", "performance", "strategies", "settings"] as const).map((t) => (
+        {(["positions", "watchlist", "journal", "performance", "strategies", "mytrades", "pennystocks", "settings"] as const).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -237,6 +316,8 @@ export default function AutoTraderDashboard({ initialData }: Props) {
             {t === "journal"     && "📝 Journal"}
             {t === "performance" && "🏆 Performance"}
             {t === "strategies"  && "🧩 Strategies"}
+            {t === "mytrades"    && "💼 My Trades"}
+            {t === "pennystocks" && "💎 Penny Stocks"}
             {t === "settings"    && "⚙️ Settings"}
           </button>
         ))}
@@ -244,10 +325,12 @@ export default function AutoTraderDashboard({ initialData }: Props) {
 
       {/* Tab Content */}
       {tab === "positions"    && <PositionsTab positions={positions} />}
-      {tab === "watchlist"   && <WatchlistTab signals={pending} />}
+      {tab === "watchlist"   && <WatchlistTab signals={pending} onTakeTrade={(sym, price) => { setPrefillTrade({ symbol: sym, price }); setTab("mytrades"); }} />}
       {tab === "journal"     && <JournalTab entries={journal} onRefresh={fetchJournal} />}
       {tab === "performance" && <PerformanceTab data={data} />}
       {tab === "strategies"  && <StrategiesTab initialConfig={data?.strategy_config} />}
+      {tab === "mytrades"    && <ManualTradesTab prefill={prefillTrade} onPrefillUsed={() => setPrefillTrade(null)} />}
+      {tab === "pennystocks" && <PennyStocksTab onTakeTrade={(sym, price) => { setPrefillTrade({ symbol: sym, price }); setTab("mytrades"); }} />}
       {tab === "settings"    && <SettingsTab onSave={fetchStatus} />}
 
       {/* Last scan */}
@@ -319,11 +402,16 @@ function PositionsTab({ positions }: { positions: AutoTraderPosition[] }) {
                         p.strategy_key === "A" ? "bg-green/10 text-green border-green/30" :
                         p.strategy_key === "B" ? "bg-blue-500/10 text-blue-400 border-blue-500/30" :
                         p.strategy_key === "C" ? "bg-yellow/10 text-yellow border-yellow/30" :
+                        p.strategy_key === "D" ? "bg-purple-500/10 text-purple-400 border-purple-500/30" :
+                        p.strategy_key === "E" ? "bg-red/10 text-red border-red/30" :
                         "bg-purple-500/10 text-purple-400 border-purple-500/30"
                       }`}>
                         {p.strategy_key === "A" ? "🚀 Momentum" :
                          p.strategy_key === "B" ? "📉 Reversal" :
-                         p.strategy_key === "C" ? "🏄 Trend" : "📰 News"}
+                         p.strategy_key === "C" ? "🏄 Trend" :
+                         p.strategy_key === "D" ? "📰 News" :
+                         p.strategy_key === "E" ? "🧠 SMC/ICT" :
+                         p.strategy_key.includes("+") ? `⚡ ${p.strategy_key}` : p.strategy_key}
                       </span>
                     )}
                   </div>
@@ -404,7 +492,7 @@ function PositionsTab({ positions }: { positions: AutoTraderPosition[] }) {
   );
 }
 
-function WatchlistTab({ signals }: { signals: AutoTraderPendingSignal[] }) {
+function WatchlistTab({ signals, onTakeTrade }: { signals: AutoTraderPendingSignal[]; onTakeTrade?: (symbol: string, price: number) => void }) {
   if (!signals.length) {
     return (
       <div className="bg-card rounded-xl border border-border p-8 text-center">
@@ -470,13 +558,21 @@ function WatchlistTab({ signals }: { signals: AutoTraderPendingSignal[] }) {
             </div>
 
             {/* Missing conditions */}
-            <div className="flex flex-wrap gap-1">
+            <div className="flex flex-wrap gap-1 mb-2">
               {s.missing?.slice(0, 3).map((m, i) => (
                 <span key={i} className="text-[9px] bg-red/10 text-red px-1.5 py-0.5 rounded">
                   ✕ {m.length > 35 ? m.substring(0, 35) + "..." : m}
                 </span>
               ))}
             </div>
+            {onTakeTrade && (
+              <button
+                onClick={() => onTakeTrade(s.symbol.replace(".NS", ""), s.price)}
+                className="mt-1 px-3 py-1 rounded-lg text-[10px] font-black bg-accent/10 hover:bg-accent/20 text-accent border border-accent/30 transition-all"
+              >
+                📌 Take Trade
+              </button>
+            )}
           </div>
         );
       })}
@@ -484,16 +580,53 @@ function WatchlistTab({ signals }: { signals: AutoTraderPendingSignal[] }) {
   );
 }
 
+type JournalByDate = {
+  date: string;
+  trades_taken: number;
+  trades_exited: number;
+  day_pnl: number;
+  entries: AutoTraderJournalEntry[];
+};
+
 function JournalTab({
-  entries,
   onRefresh,
 }: {
-  entries: AutoTraderJournalEntry[];
+  entries?: AutoTraderJournalEntry[];
   onRefresh: () => void;
 }) {
-  useEffect(() => { onRefresh(); }, []);
+  const [byDate, setByDate] = useState<JournalByDate[]>([]);
+  const [loadingJournal, setLoadingJournal] = useState(false);
+  const [stratFilter, setStratFilter] = useState<string>("All");
 
-  if (!entries.length) {
+  useEffect(() => {
+    fetchByDate();
+  }, []);
+
+  async function fetchByDate() {
+    setLoadingJournal(true);
+    try {
+      const res = await fetch(`${API}/api/auto-trader/journal/by-date`);
+      const d = await res.json();
+      setByDate(Array.isArray(d) ? d : []);
+    } catch { /* ignore */ }
+    setLoadingJournal(false);
+    onRefresh();
+  }
+
+  const stratFilters = ["All", "A", "B", "C", "D", "E", "Combos"];
+
+  function matchesFilter(entry: AutoTraderJournalEntry): boolean {
+    if (stratFilter === "All") return true;
+    const key = (entry as AutoTraderJournalEntry & { strategy_key?: string }).strategy_key ?? "";
+    if (stratFilter === "Combos") return key.includes("+");
+    return key === stratFilter;
+  }
+
+  if (loadingJournal) {
+    return <div className="text-center text-muted py-8 text-sm">Loading journal...</div>;
+  }
+
+  if (!byDate.length) {
     return (
       <div className="bg-card rounded-xl border border-border p-8 text-center">
         <span className="text-3xl block mb-2">📝</span>
@@ -504,51 +637,312 @@ function JournalTab({
   }
 
   return (
-    <div className="space-y-2">
-      {entries.slice().reverse().map((e, i) => {
-        const isEntry = e.action === "ENTER";
-        const isExit = e.action === "EXIT" || e.action === "PARTIAL_EXIT";
-        return (
-          <div
-            key={i}
-            className={`bg-card rounded-lg border p-3 ${
-              isEntry ? "border-green/30" : isExit ? "border-red/30" : "border-border"
+    <div className="space-y-4">
+      {/* Strategy filter bar */}
+      <div className="flex gap-1.5 flex-wrap">
+        {stratFilters.map((f) => (
+          <button
+            key={f}
+            onClick={() => setStratFilter(f)}
+            className={`px-3 py-1 rounded-full text-[10px] font-black transition-all border ${
+              stratFilter === f
+                ? "bg-accent text-white border-accent"
+                : "bg-card border-border text-muted hover:border-accent/50 hover:text-foreground"
             }`}
           >
-            <div className="flex items-center justify-between mb-1">
-              <div className="flex items-center gap-2">
-                <span className={`text-[10px] font-black px-2 py-0.5 rounded ${
-                  isEntry ? "bg-green text-white" : isExit ? "bg-red text-white" : "bg-muted/20 text-muted"
-                }`}>
-                  {e.action}
-                </span>
-                <span className="font-bold text-sm text-foreground">{e.symbol?.replace(".NS", "")}</span>
-                {e.confluence_score && (
-                  <span className="text-[10px] text-muted">Confluence: {e.confluence_score}/100</span>
-                )}
-              </div>
-              <div className="text-right">
-                {e.pnl !== undefined && (
-                  <span className={`text-sm font-bold ${(e.pnl ?? 0) >= 0 ? "text-green" : "text-red"}`}>
-                    ₹{e.pnl?.toLocaleString("en-IN")} ({e.pnl_pct?.toFixed(1)}%)
-                  </span>
-                )}
-                <div className="text-[9px] text-muted">
-                  {new Date(e.timestamp).toLocaleTimeString("en-IN")}
-                  {e.hold_duration_minutes ? ` | ${e.hold_duration_minutes}min` : ""}
+            {f}
+          </button>
+        ))}
+        <button
+          onClick={fetchByDate}
+          className="ml-auto px-3 py-1 rounded-full text-[10px] font-black bg-card border border-border text-muted hover:border-accent/50 hover:text-foreground transition-all"
+        >
+          🔄 Refresh
+        </button>
+      </div>
+
+      {/* Grouped by date */}
+      {byDate.map((day) => {
+        const filtered = day.entries.filter(matchesFilter);
+        if (stratFilter !== "All" && filtered.length === 0) return null;
+        const displayDate = new Date(day.date + "T00:00:00").toLocaleDateString("en-US", {
+          month: "short", day: "numeric", year: "numeric",
+        });
+        return (
+          <div key={day.date} className="space-y-2">
+            {/* Date header */}
+            <div className="bg-card rounded-xl border border-border px-4 py-3 flex flex-wrap items-center gap-3">
+              <span className="font-black text-sm text-foreground">{displayDate}</span>
+              <span className="text-[10px] font-bold text-green">{day.trades_taken} entered</span>
+              <span className="text-[10px] font-bold text-orange-400">{day.trades_exited} exited</span>
+              <span className={`text-[10px] font-bold ml-auto ${day.day_pnl >= 0 ? "text-green" : "text-red"}`}>
+                {day.day_pnl >= 0 ? "+" : ""}₹{day.day_pnl.toLocaleString("en-IN")}
+              </span>
+            </div>
+
+            {/* Entries under this day */}
+            {(stratFilter === "All" ? day.entries : filtered).map((e, i) => {
+              const isEntry = e.action === "ENTER";
+              const isExit = e.action === "EXIT" || e.action === "PARTIAL_EXIT";
+              const stratKey = (e as AutoTraderJournalEntry & { strategy_key?: string }).strategy_key;
+              return (
+                <div
+                  key={i}
+                  className={`bg-card rounded-lg border p-3 ml-4 ${
+                    isEntry ? "border-green/30" : isExit ? "border-red/30" : "border-border"
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className={`text-[10px] font-black px-2 py-0.5 rounded ${
+                        isEntry ? "bg-green text-white" : isExit ? "bg-red text-white" : "bg-muted/20 text-muted"
+                      }`}>
+                        {e.action}
+                      </span>
+                      <span className="font-bold text-sm text-foreground">{e.symbol?.replace(".NS", "")}</span>
+                      {stratKey && (
+                        <span className={`text-[9px] font-black px-1.5 py-0.5 rounded border ${
+                          stratKey === "A" ? "bg-green/10 text-green border-green/30" :
+                          stratKey === "B" ? "bg-blue-500/10 text-blue-400 border-blue-500/30" :
+                          stratKey === "C" ? "bg-yellow/10 text-yellow border-yellow/30" :
+                          stratKey === "D" ? "bg-purple-500/10 text-purple-400 border-purple-500/30" :
+                          stratKey === "E" ? "bg-red/10 text-red border-red/30" :
+                          "bg-purple-500/10 text-purple-400 border-purple-500/30"
+                        }`}>
+                          {stratKey === "A" ? "🚀 A" :
+                           stratKey === "B" ? "📉 B" :
+                           stratKey === "C" ? "🏄 C" :
+                           stratKey === "D" ? "📰 D" :
+                           stratKey === "E" ? "🧠 E" :
+                           stratKey.includes("+") ? `⚡ ${stratKey}` : stratKey}
+                        </span>
+                      )}
+                      {e.confluence_score != null && (
+                        <span className="text-[10px] text-muted">Conf: {e.confluence_score}/100</span>
+                      )}
+                    </div>
+                    <div className="text-right">
+                      {e.pnl !== undefined && (
+                        <div className={`text-sm font-bold ${(e.pnl ?? 0) >= 0 ? "text-green" : "text-red"}`}>
+                          ₹{e.pnl?.toLocaleString("en-IN")} ({e.pnl_pct?.toFixed(1)}%)
+                        </div>
+                      )}
+                      <div className="text-[9px] text-muted">
+                        {new Date(e.timestamp).toLocaleTimeString("en-IN")}
+                        {e.hold_duration_minutes ? ` | ${e.hold_duration_minutes}min` : ""}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* ENTER specific fields */}
+                  {isEntry && (
+                    <div className="flex flex-wrap gap-2 mb-1 text-[9px]">
+                      {(e as AutoTraderJournalEntry & { entry_price?: number }).entry_price != null && (
+                        <span className="bg-green/10 text-green px-1.5 py-0.5 rounded">
+                          Entry ₹{(e as AutoTraderJournalEntry & { entry_price?: number }).entry_price?.toLocaleString("en-IN")}
+                        </span>
+                      )}
+                      {(e as AutoTraderJournalEntry & { stop_loss?: number }).stop_loss != null && (
+                        <span className="bg-red/10 text-red px-1.5 py-0.5 rounded">
+                          SL ₹{(e as AutoTraderJournalEntry & { stop_loss?: number }).stop_loss?.toLocaleString("en-IN")}
+                        </span>
+                      )}
+                      {(e as AutoTraderJournalEntry & { target_1?: number }).target_1 != null && (
+                        <span className="bg-accent/10 text-accent px-1.5 py-0.5 rounded">
+                          T1 ₹{(e as AutoTraderJournalEntry & { target_1?: number }).target_1?.toLocaleString("en-IN")}
+                        </span>
+                      )}
+                    </div>
+                  )}
+
+                  {/* EXIT specific fields */}
+                  {isExit && (e as AutoTraderJournalEntry & { exit_price?: number }).exit_price != null && (
+                    <div className="flex flex-wrap gap-2 mb-1 text-[9px]">
+                      <span className="bg-red/10 text-red px-1.5 py-0.5 rounded">
+                        Exit ₹{(e as AutoTraderJournalEntry & { exit_price?: number }).exit_price?.toLocaleString("en-IN")}
+                      </span>
+                    </div>
+                  )}
+
+                  <div className="flex flex-wrap gap-1">
+                    {e.reasoning?.map((r, j) => (
+                      <span key={j} className="text-[9px] text-foreground/70 bg-background px-1.5 py-0.5 rounded">
+                        {r}
+                      </span>
+                    ))}
+                  </div>
                 </div>
-              </div>
-            </div>
-            <div className="flex flex-wrap gap-1">
-              {e.reasoning?.map((r, j) => (
-                <span key={j} className="text-[9px] text-foreground/70 bg-background px-1.5 py-0.5 rounded">
-                  {r}
-                </span>
-              ))}
-            </div>
+              );
+            })}
           </div>
         );
       })}
+    </div>
+  );
+}
+
+// ── Strategy Detail Panel ─────────────────────────────────────────────
+
+const STRATEGY_DETAILS: Record<string, { emoji: string; fullName: string; conditions: string; description: string }> = {
+  A: {
+    emoji: "🚀",
+    fullName: "Momentum Breakout",
+    conditions: "RSI between 50–68, MACD signal = BUY, Volume spike > 1.5×, Supertrend = UP",
+    description: "Catches stocks that just broke out of a base on high volume with momentum building. Best in trending markets.",
+  },
+  B: {
+    emoji: "📉",
+    fullName: "Oversold Reversal",
+    conditions: "RSI < 38, Price near Bollinger Band lower, Stochastic K < 25",
+    description: "Finds stocks beaten down too hard and ready to bounce back. Works well after sharp sell-offs.",
+  },
+  C: {
+    emoji: "🏄",
+    fullName: "Trend Rider",
+    conditions: "ADX > 25 (strong trend), Supertrend = UP, EMA alignment bullish, OBV rising",
+    description: "Joins an already-established strong trend. Low false-signal rate in trending markets.",
+  },
+  D: {
+    emoji: "📰",
+    fullName: "News Catalyst",
+    conditions: "Stock-specific positive news, investor consensus > 3/5 legends agree",
+    description: "Trades stocks with fresh positive catalysts supported by institutional consensus signals.",
+  },
+  E: {
+    emoji: "🧠",
+    fullName: "SMC / ICT",
+    conditions: "Order Block formed + price returning to it, OR Fair Value Gap present, OR Break of Structure confirmed",
+    description: "Smart Money Concepts — follows institutional order flow, not retail indicators.",
+  },
+};
+
+function StrategyDetailPanel({
+  strategyId,
+  trades,
+  loading,
+  perfData,
+}: {
+  strategyId: string;
+  trades: AutoTraderJournalEntry[];
+  loading: boolean;
+  perfData?: { trades: number; wins: number; losses: number; win_rate: number; pnl: number };
+}) {
+  const detail = STRATEGY_DETAILS[strategyId];
+  const winRate = perfData?.win_rate ?? 0;
+  const winColor = winRate > 60 ? "bg-green" : winRate >= 40 ? "bg-yellow" : "bg-red";
+  const winTextColor = winRate > 60 ? "text-green" : winRate >= 40 ? "text-yellow" : "text-red";
+
+  return (
+    <div className="mt-3 bg-background rounded-xl border border-border p-4 space-y-4">
+      {/* Strategy card */}
+      {detail ? (
+        <div className="flex items-start gap-3">
+          <span className="text-3xl">{detail.emoji}</span>
+          <div>
+            <div className="font-black text-foreground">
+              {strategyId} — {detail.emoji} {detail.fullName}
+            </div>
+            <div className="text-[10px] text-muted mt-1">
+              <span className="font-bold text-foreground/70">Conditions:</span> {detail.conditions}
+            </div>
+            <div className="text-[10px] text-foreground/70 mt-1">{detail.description}</div>
+          </div>
+        </div>
+      ) : (
+        <div className="font-black text-foreground">Strategy {strategyId}</div>
+      )}
+
+      {/* Stats */}
+      {perfData && perfData.trades > 0 ? (
+        <div className="space-y-2">
+          <div className="grid grid-cols-3 gap-2">
+            <div className="bg-card rounded-lg p-2 text-center">
+              <div className="text-[9px] text-muted uppercase font-bold">Win Probability</div>
+              <div className={`text-lg font-black ${winTextColor}`}>{winRate}%</div>
+            </div>
+            <div className="bg-card rounded-lg p-2 text-center">
+              <div className="text-[9px] text-muted uppercase font-bold">Trades</div>
+              <div className="text-lg font-black text-foreground">{perfData.trades}</div>
+            </div>
+            <div className="bg-card rounded-lg p-2 text-center">
+              <div className="text-[9px] text-muted uppercase font-bold">Total P&L</div>
+              <div className={`text-lg font-black ${perfData.pnl >= 0 ? "text-green" : "text-red"}`}>
+                ₹{perfData.pnl >= 0 ? "+" : ""}{perfData.pnl.toLocaleString("en-IN")}
+              </div>
+            </div>
+          </div>
+          {/* Win probability bar */}
+          <div>
+            <div className="flex items-center justify-between text-[9px] text-muted mb-1">
+              <span>Win Probability</span>
+              <span className={winTextColor}>{winRate}%</span>
+            </div>
+            <div className="w-full h-2 bg-card rounded-full overflow-hidden">
+              <div className={`h-full rounded-full transition-all ${winColor}`} style={{ width: `${winRate}%` }} />
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="text-[10px] text-muted italic">No performance data yet for this strategy.</div>
+      )}
+
+      {/* Trades list */}
+      <div>
+        <div className="text-[10px] font-black text-foreground uppercase mb-2">Trades by this Strategy</div>
+        {loading ? (
+          <div className="text-center text-muted py-4 text-xs">Loading trades...</div>
+        ) : trades.length === 0 ? (
+          <div className="text-center text-muted py-4 text-xs">No trades found for strategy {strategyId}</div>
+        ) : (
+          <div className="max-h-64 overflow-y-auto space-y-1.5">
+            {trades.map((t, i) => {
+              const isExit = t.action === "EXIT" || t.action === "PARTIAL_EXIT";
+              const stratKey = (t as AutoTraderJournalEntry & { strategy_key?: string }).strategy_key;
+              return (
+                <div
+                  key={i}
+                  className={`bg-card rounded-lg border px-3 py-2 flex items-center justify-between ${
+                    t.action === "ENTER" ? "border-green/20" : isExit ? "border-red/20" : "border-border"
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <span className={`text-[9px] font-black px-1.5 py-0.5 rounded ${
+                      t.action === "ENTER" ? "bg-green text-white" : isExit ? "bg-red text-white" : "bg-muted/20 text-muted"
+                    }`}>
+                      {t.action}
+                    </span>
+                    <span className="text-xs font-bold text-foreground">{t.symbol?.replace(".NS", "")}</span>
+                    {stratKey && (
+                      <span className="text-[9px] bg-accent/10 text-accent px-1.5 py-0.5 rounded border border-accent/30 font-bold">
+                        {stratKey}
+                      </span>
+                    )}
+                    <span className="text-[9px] text-muted">
+                      {new Date(t.timestamp).toLocaleDateString("en-IN", { month: "short", day: "numeric" })}
+                    </span>
+                    <span className="text-[9px] text-muted/70">
+                      {new Date(t.timestamp).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}
+                    </span>
+                  </div>
+                  <div className="text-right">
+                    {isExit && t.pnl !== undefined ? (
+                      <span className={`text-xs font-bold ${(t.pnl ?? 0) >= 0 ? "text-green" : "text-red"}`}>
+                        ₹{t.pnl?.toLocaleString("en-IN")} ({t.pnl_pct?.toFixed(1)}%)
+                      </span>
+                    ) : (
+                      (t as AutoTraderJournalEntry & { entry_price?: number }).entry_price != null && (
+                        <span className="text-xs text-green">
+                          ₹{(t as AutoTraderJournalEntry & { entry_price?: number }).entry_price?.toLocaleString("en-IN")}
+                        </span>
+                      )
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -694,22 +1088,33 @@ function StrategiesTab({ initialConfig }: { initialConfig?: StrategyConfig }) {
 
                 {/* Performance stats */}
                 {p && p.trades > 0 ? (
-                  <div className="grid grid-cols-4 gap-1.5 mt-2">
-                    <div className="bg-background rounded-lg p-1.5 text-center">
-                      <div className="text-[9px] text-muted">Trades</div>
-                      <div className="text-sm font-black text-foreground">{p.trades}</div>
+                  <div className="mt-2 space-y-2">
+                    <div className="grid grid-cols-3 gap-1.5">
+                      <div className="bg-background rounded-lg p-1.5 text-center">
+                        <div className="text-[9px] text-muted">Trades</div>
+                        <div className="text-sm font-black text-foreground">{p.trades}</div>
+                      </div>
+                      <div className="bg-background rounded-lg p-1.5 text-center">
+                        <div className="text-[9px] text-muted">P&L</div>
+                        <div className={`text-sm font-black ${p.pnl >= 0 ? "text-green" : "text-red"}`}>₹{p.pnl >= 0 ? "+" : ""}{p.pnl.toLocaleString("en-IN")}</div>
+                      </div>
+                      <div className="bg-background rounded-lg p-1.5 text-center">
+                        <div className="text-[9px] text-muted">W/L</div>
+                        <div className="text-sm font-black text-foreground">{p.wins}/{p.losses}</div>
+                      </div>
                     </div>
-                    <div className="bg-background rounded-lg p-1.5 text-center">
-                      <div className="text-[9px] text-muted">Win %</div>
-                      <div className={`text-sm font-black ${p.win_rate >= 50 ? "text-green" : "text-red"}`}>{p.win_rate}%</div>
-                    </div>
-                    <div className="bg-background rounded-lg p-1.5 text-center">
-                      <div className="text-[9px] text-muted">P&L</div>
-                      <div className={`text-sm font-black ${p.pnl >= 0 ? "text-green" : "text-red"}`}>₹{p.pnl >= 0 ? "+" : ""}{p.pnl.toLocaleString("en-IN")}</div>
-                    </div>
-                    <div className="bg-background rounded-lg p-1.5 text-center">
-                      <div className="text-[9px] text-muted">W/L</div>
-                      <div className="text-sm font-black text-foreground">{p.wins}/{p.losses}</div>
+                    {/* Win Probability bar */}
+                    <div className="bg-background rounded-lg p-2">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-[9px] text-muted font-bold">Win Probability</span>
+                        <span className={`text-[9px] font-black ${p.win_rate >= 60 ? "text-green" : p.win_rate >= 40 ? "text-yellow" : "text-red"}`}>{p.win_rate}%</span>
+                      </div>
+                      <div className="w-full h-1.5 bg-card rounded-full overflow-hidden">
+                        <div
+                          className={`h-full rounded-full transition-all ${p.win_rate >= 60 ? "bg-green" : p.win_rate >= 40 ? "bg-yellow" : "bg-red"}`}
+                          style={{ width: `${p.win_rate}%` }}
+                        />
+                      </div>
                     </div>
                   </div>
                 ) : (
@@ -1534,7 +1939,7 @@ function PerformanceTab({ data }: { data: AutoTraderData | null }) {
         <div>
           <div className="text-xs text-muted uppercase font-bold">Best Performing Strategy</div>
           <div className="font-black text-foreground">{bestInfo.name}</div>
-          <div className="text-xs text-green">₹{best[1].pnl.toLocaleString("en-IN")} P&L • {best[1].win_rate}% Win Rate • {best[1].trades} trades</div>
+          <div className="text-xs text-green">₹{best[1].pnl.toLocaleString("en-IN")} P&L • {best[1].win_rate}% Win Probability • {best[1].trades} trades</div>
         </div>
       </div>
 
@@ -1543,13 +1948,15 @@ function PerformanceTab({ data }: { data: AutoTraderData | null }) {
         <div className="grid grid-cols-6 px-4 py-2 bg-background text-[9px] text-muted font-bold uppercase">
           <div className="col-span-2">Strategy</div>
           <div className="text-center">Trades</div>
-          <div className="text-center">Win%</div>
+          <div className="text-center">Win Probability</div>
           <div className="text-center">Avg Win</div>
           <div className="text-center">P&L</div>
         </div>
         {entries.map(([key, s]) => {
           const info = getComboInfo(key);
           const isCombo = key.includes("+");
+          const winProbColor = s.win_rate >= 60 ? "text-green" : s.win_rate >= 40 ? "text-yellow" : "text-red";
+          const winProbBar = s.win_rate >= 60 ? "bg-green" : s.win_rate >= 40 ? "bg-yellow" : "bg-red";
           return (
             <div key={key} className={`grid grid-cols-6 px-4 py-2.5 border-t border-border/50 items-center ${isCombo ? "bg-accent/5" : ""}`}>
               <div className="col-span-2 flex items-center gap-2">
@@ -1562,8 +1969,11 @@ function PerformanceTab({ data }: { data: AutoTraderData | null }) {
                 </div>
               </div>
               <div className="text-center text-xs font-bold text-foreground">{s.trades}</div>
-              <div className={`text-center text-xs font-bold ${s.win_rate >= 60 ? "text-green" : s.win_rate >= 40 ? "text-yellow" : "text-red"}`}>
-                {s.win_rate}%
+              <div className="text-center">
+                <div className={`text-xs font-bold ${winProbColor}`}>{s.win_rate}%</div>
+                <div className="w-full h-1 bg-background rounded-full overflow-hidden mt-0.5">
+                  <div className={`h-full rounded-full ${winProbBar}`} style={{ width: `${s.win_rate}%` }} />
+                </div>
               </div>
               <div className="text-center text-xs text-green">₹{s.avg_win?.toLocaleString("en-IN") ?? "—"}</div>
               <div className={`text-center text-xs font-bold ${s.pnl >= 0 ? "text-green" : "text-red"}`}>
@@ -1577,6 +1987,436 @@ function PerformanceTab({ data }: { data: AutoTraderData | null }) {
       <div className="text-center text-[9px] text-muted">
         Combos (e.g. A+B) = both strategies fired on same trade. More combos appear as trades accumulate.
       </div>
+    </div>
+  );
+}
+
+// ── Manual Trades Tab ─────────────────────────────────────────────────
+
+interface ManualTrade {
+  id: string;
+  symbol: string;
+  entry_price: number;
+  quantity: number;
+  trade_type: string;
+  notes: string;
+  entry_time: string;
+  status: "OPEN" | "CLOSED";
+  pnl: number;
+  pnl_pct: number;
+  exit_price?: number;
+  exit_time?: string;
+  exit_notes?: string;
+}
+
+function ManualTradesTab({ prefill, onPrefillUsed }: { prefill: { symbol: string; price: number } | null; onPrefillUsed: () => void }) {
+  const [trades, setTrades] = useState<ManualTrade[]>([]);
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState({ symbol: "", entry_price: "", quantity: "1", trade_type: "Intraday", notes: "" });
+  const [exitForm, setExitForm] = useState<{ id: string; price: string } | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    fetchTrades();
+  }, []);
+
+  // Handle prefill from watchlist/penny stocks
+  useEffect(() => {
+    if (prefill) {
+      setForm(f => ({ ...f, symbol: prefill.symbol, entry_price: String(prefill.price) }));
+      setShowForm(true);
+      onPrefillUsed();
+    }
+  }, [prefill, onPrefillUsed]);
+
+  async function fetchTrades() {
+    try {
+      const res = await fetch(`${API}/api/manual-trades`);
+      const d = await res.json();
+      setTrades(Array.isArray(d) ? d.reverse() : []);
+    } catch { /* ignore */ }
+  }
+
+  async function submitTrade(e: React.FormEvent) {
+    e.preventDefault();
+    setSubmitting(true);
+    try {
+      await fetch(`${API}/api/manual-trades`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          symbol: form.symbol.toUpperCase(),
+          entry_price: parseFloat(form.entry_price),
+          quantity: parseInt(form.quantity),
+          trade_type: form.trade_type,
+          notes: form.notes,
+        }),
+      });
+      setForm({ symbol: "", entry_price: "", quantity: "1", trade_type: "Intraday", notes: "" });
+      setShowForm(false);
+      await fetchTrades();
+    } catch { /* ignore */ }
+    setSubmitting(false);
+  }
+
+  async function submitExit(id: string, price: string) {
+    try {
+      await fetch(`${API}/api/manual-trades/${id}/exit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ exit_price: parseFloat(price) }),
+      });
+      setExitForm(null);
+      await fetchTrades();
+    } catch { /* ignore */ }
+  }
+
+  async function deleteTrade(id: string) {
+    try {
+      await fetch(`${API}/api/manual-trades/${id}`, { method: "DELETE" });
+      await fetchTrades();
+    } catch { /* ignore */ }
+  }
+
+  const openTrades = trades.filter(t => t.status === "OPEN");
+  const closedTrades = trades.filter(t => t.status === "CLOSED");
+  const totalPnl = closedTrades.reduce((sum, t) => sum + (t.pnl ?? 0), 0);
+
+  const typeBadge = (type: string) => {
+    if (type === "Intraday") return "bg-green/20 text-green";
+    if (type === "Swing") return "bg-blue-500/20 text-blue-400";
+    return "bg-purple-500/20 text-purple-400";
+  };
+
+  return (
+    <div className="space-y-4">
+      {/* Summary */}
+      <div className="grid grid-cols-3 gap-3">
+        <div className="bg-card rounded-xl border border-border p-3 text-center">
+          <div className="text-[9px] text-muted uppercase font-bold">Total Trades</div>
+          <div className="text-xl font-black text-foreground">{trades.length}</div>
+        </div>
+        <div className="bg-card rounded-xl border border-border p-3 text-center">
+          <div className="text-[9px] text-muted uppercase font-bold">Open Trades</div>
+          <div className="text-xl font-black text-yellow">{openTrades.length}</div>
+        </div>
+        <div className="bg-card rounded-xl border border-border p-3 text-center">
+          <div className="text-[9px] text-muted uppercase font-bold">Total P&L</div>
+          <div className={`text-xl font-black ${totalPnl >= 0 ? "text-green" : "text-red"}`}>
+            ₹{totalPnl.toLocaleString("en-IN", { maximumFractionDigits: 2 })}
+          </div>
+        </div>
+      </div>
+
+      {/* Take Trade Button */}
+      <button
+        onClick={() => setShowForm(!showForm)}
+        className="w-full sm:w-auto px-5 py-2.5 rounded-xl font-black text-sm bg-accent hover:bg-accent/80 text-white transition-all shadow-lg shadow-accent/20"
+      >
+        {showForm ? "✕ Cancel" : "➕ TAKE TRADE"}
+      </button>
+
+      {/* Inline Form */}
+      {showForm && (
+        <form onSubmit={submitTrade} className="bg-card rounded-xl border border-border p-4 space-y-3">
+          <div className="text-xs font-black text-foreground uppercase mb-2">New Manual Trade</div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+            <div>
+              <label className="text-[10px] text-muted font-bold uppercase block mb-1">Symbol</label>
+              <input
+                type="text"
+                required
+                placeholder="RELIANCE"
+                value={form.symbol}
+                onChange={e => setForm(f => ({ ...f, symbol: e.target.value.toUpperCase() }))}
+                className="w-full bg-background text-foreground text-xs px-3 py-2 rounded border border-border focus:border-accent outline-none"
+              />
+            </div>
+            <div>
+              <label className="text-[10px] text-muted font-bold uppercase block mb-1">Entry Price</label>
+              <input
+                type="number"
+                required
+                step="0.01"
+                placeholder="0.00"
+                value={form.entry_price}
+                onChange={e => setForm(f => ({ ...f, entry_price: e.target.value }))}
+                className="w-full bg-background text-foreground text-xs px-3 py-2 rounded border border-border focus:border-accent outline-none"
+              />
+            </div>
+            <div>
+              <label className="text-[10px] text-muted font-bold uppercase block mb-1">Quantity</label>
+              <input
+                type="number"
+                required
+                min="1"
+                value={form.quantity}
+                onChange={e => setForm(f => ({ ...f, quantity: e.target.value }))}
+                className="w-full bg-background text-foreground text-xs px-3 py-2 rounded border border-border focus:border-accent outline-none"
+              />
+            </div>
+            <div>
+              <label className="text-[10px] text-muted font-bold uppercase block mb-1">Type</label>
+              <select
+                value={form.trade_type}
+                onChange={e => setForm(f => ({ ...f, trade_type: e.target.value }))}
+                className="w-full bg-background text-foreground text-xs px-3 py-2 rounded border border-border focus:border-accent outline-none"
+              >
+                <option>Intraday</option>
+                <option>Swing</option>
+                <option>Positional</option>
+              </select>
+            </div>
+            <div className="col-span-2 sm:col-span-2">
+              <label className="text-[10px] text-muted font-bold uppercase block mb-1">Notes</label>
+              <input
+                type="text"
+                placeholder="Reason for trade..."
+                value={form.notes}
+                onChange={e => setForm(f => ({ ...f, notes: e.target.value }))}
+                className="w-full bg-background text-foreground text-xs px-3 py-2 rounded border border-border focus:border-accent outline-none"
+              />
+            </div>
+          </div>
+          <button
+            type="submit"
+            disabled={submitting}
+            className="px-5 py-2 rounded-xl font-black text-xs bg-green hover:bg-green/80 text-white transition-all"
+          >
+            {submitting ? "Saving..." : "✅ Save Trade"}
+          </button>
+        </form>
+      )}
+
+      {/* Trade List */}
+      {trades.length === 0 ? (
+        <div className="bg-card rounded-xl border border-border p-8 text-center">
+          <span className="text-3xl block mb-2">💼</span>
+          <p className="text-sm font-bold text-muted">No manual trades yet</p>
+          <p className="text-xs text-muted mt-1">Click "TAKE TRADE" to log your first trade</p>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {trades.map(t => {
+            const isProfit = (t.pnl ?? 0) >= 0;
+            return (
+              <div key={t.id} className={`bg-card rounded-xl border p-4 ${t.status === "OPEN" ? "border-yellow/30" : isProfit ? "border-green/30" : "border-red/30"}`}>
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-black text-foreground">{t.symbol}</span>
+                    <span className={`text-[10px] font-black px-2 py-0.5 rounded ${typeBadge(t.trade_type)}`}>{t.trade_type}</span>
+                    <span className={`text-[10px] font-black px-2 py-0.5 rounded ${
+                      t.status === "OPEN" ? "bg-yellow/20 text-yellow" : isProfit ? "bg-green/20 text-green" : "bg-red/20 text-red"
+                    }`}>{t.status}</span>
+                  </div>
+                  <button onClick={() => deleteTrade(t.id)} className="text-[9px] text-muted hover:text-red transition-colors">✕</button>
+                </div>
+
+                <div className="grid grid-cols-3 sm:grid-cols-4 gap-2 mt-3 text-xs">
+                  <div>
+                    <div className="text-muted text-[9px]">Entry</div>
+                    <div className="font-bold">₹{t.entry_price.toLocaleString("en-IN")}</div>
+                  </div>
+                  <div>
+                    <div className="text-muted text-[9px]">Qty</div>
+                    <div className="font-bold">{t.quantity}</div>
+                  </div>
+                  {t.status === "CLOSED" && t.exit_price != null && (
+                    <div>
+                      <div className="text-muted text-[9px]">Exit</div>
+                      <div className="font-bold">₹{t.exit_price.toLocaleString("en-IN")}</div>
+                    </div>
+                  )}
+                  {t.status === "CLOSED" && (
+                    <div>
+                      <div className="text-muted text-[9px]">P&L</div>
+                      <div className={`font-black ${isProfit ? "text-green" : "text-red"}`}>
+                        ₹{(t.pnl ?? 0).toFixed(2)} ({(t.pnl_pct ?? 0).toFixed(2)}%)
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="mt-2 text-[9px] text-muted">
+                  {new Date(t.entry_time).toLocaleString("en-IN")}
+                  {t.notes && <span className="ml-2 italic">{t.notes}</span>}
+                </div>
+
+                {/* Exit form for OPEN trades */}
+                {t.status === "OPEN" && (
+                  <div className="mt-3">
+                    {exitForm?.id === t.id ? (
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number"
+                          step="0.01"
+                          placeholder="Exit price"
+                          value={exitForm.price}
+                          onChange={e => setExitForm({ id: t.id, price: e.target.value })}
+                          className="w-32 bg-background text-foreground text-xs px-3 py-1.5 rounded border border-border focus:border-green outline-none"
+                        />
+                        <button
+                          onClick={() => submitExit(t.id, exitForm.price)}
+                          disabled={!exitForm.price}
+                          className="px-3 py-1.5 rounded-lg text-[10px] font-black bg-green hover:bg-green/80 text-white transition-all disabled:opacity-50"
+                        >
+                          Confirm Exit
+                        </button>
+                        <button onClick={() => setExitForm(null)} className="text-xs text-muted hover:text-foreground">Cancel</button>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => setExitForm({ id: t.id, price: "" })}
+                        className="px-3 py-1.5 rounded-lg text-[10px] font-black bg-card border border-border hover:border-green hover:text-green text-muted transition-all"
+                      >
+                        ✅ Exit Trade
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Penny Stocks Tab ──────────────────────────────────────────────────
+
+const FEATURED_PENNY_STOCKS = [
+  "SUZLON", "YESBANK", "TATAPOWER", "RVNL", "IRFC",
+  "NBCC", "NHPC", "SJVN", "HFCL", "RPOWER",
+  "SOUTHINDBANK", "JSWENERGY", "IRCON",
+];
+
+import type { StockAnalysis } from "@/lib/types";
+
+function PennyStocksTab({ onTakeTrade }: { onTakeTrade?: (symbol: string, price: number) => void }) {
+  const [allStocks, setAllStocks] = useState<StockAnalysis[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    setLoading(true);
+    fetch(`${API}/api/dashboard`)
+      .then(r => r.json())
+      .then(d => {
+        if (Array.isArray(d.all_stocks)) setAllStocks(d.all_stocks);
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, []);
+
+  const signalColor = (sig: string) => {
+    if (sig === "STRONG_BUY" || sig === "BUY") return "text-green";
+    if (sig === "STRONG_SELL" || sig === "SELL") return "text-red";
+    return "text-muted";
+  };
+
+  const featured = allStocks.filter(s =>
+    FEATURED_PENNY_STOCKS.some(f => s.symbol.startsWith(f))
+  );
+
+  const lowPrice = allStocks.filter(s =>
+    s.price < 300 &&
+    !FEATURED_PENNY_STOCKS.some(f => s.symbol.startsWith(f))
+  );
+
+  function StockCard({ s }: { s: StockAnalysis }) {
+    const isUp = (s.change_percent ?? 0) >= 0;
+    return (
+      <div className="bg-card rounded-xl border border-border p-3 space-y-2">
+        <div className="flex items-start justify-between">
+          <div>
+            <div className="font-black text-foreground text-sm">{s.symbol.replace(".NS", "")}</div>
+            <div className="text-[9px] text-muted truncate max-w-[120px]">{s.name}</div>
+          </div>
+          <div className="text-right">
+            <div className="font-black text-foreground">₹{s.price?.toLocaleString("en-IN")}</div>
+            <div className={`text-[10px] font-bold ${isUp ? "text-green" : "text-red"}`}>
+              {isUp ? "▲" : "▼"} {Math.abs(s.change_percent ?? 0).toFixed(2)}%
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-3 gap-1 text-[9px]">
+          <div className="bg-background rounded p-1 text-center">
+            <div className="text-muted">Signal</div>
+            <div className={`font-black text-[8px] ${signalColor(s.signal)}`}>{s.signal?.replace("_", " ") ?? "—"}</div>
+          </div>
+          <div className="bg-background rounded p-1 text-center">
+            <div className="text-muted">Score</div>
+            <div className={`font-black ${s.score >= 60 ? "text-green" : s.score >= 40 ? "text-yellow" : "text-muted"}`}>{s.score ?? "—"}</div>
+          </div>
+          <div className="bg-background rounded p-1 text-center">
+            <div className="text-muted">RSI</div>
+            <div className={`font-black ${(s.rsi ?? 50) < 30 ? "text-green" : (s.rsi ?? 50) > 70 ? "text-red" : "text-foreground"}`}>{s.rsi?.toFixed(0) ?? "—"}</div>
+          </div>
+        </div>
+
+        {onTakeTrade && s.price > 0 && (
+          <button
+            onClick={() => onTakeTrade(s.symbol.replace(".NS", ""), s.price)}
+            className="w-full py-1 rounded-lg text-[10px] font-black bg-accent/10 hover:bg-accent/20 text-accent border border-accent/30 transition-all"
+          >
+            📌 Take Trade
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  if (loading) {
+    return <div className="text-center text-muted py-8 text-sm">Loading penny stocks...</div>;
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Featured */}
+      <div>
+        <div className="flex items-center gap-2 mb-3">
+          <span className="text-sm font-black text-foreground uppercase">Featured Penny Stocks</span>
+          <span className="text-[9px] bg-yellow/20 text-yellow px-2 py-0.5 rounded font-bold">POPULAR</span>
+        </div>
+        {featured.length === 0 ? (
+          <div className="bg-card rounded-xl border border-border p-6 text-center">
+            <p className="text-xs text-muted">Dashboard data loading... Run a refresh to populate stock data.</p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+            {featured.map(s => <StockCard key={s.symbol} s={s} />)}
+          </div>
+        )}
+
+        {/* Show featured that are not in data yet */}
+        {(() => {
+          const foundSymbols = new Set(featured.map(s => s.symbol.replace(".NS", "")));
+          const missing = FEATURED_PENNY_STOCKS.filter(f => !foundSymbols.has(f));
+          if (!missing.length) return null;
+          return (
+            <div className="mt-2 flex flex-wrap gap-1">
+              {missing.map(sym => (
+                <span key={sym} className="text-[9px] bg-card border border-border rounded px-2 py-1 text-muted">{sym}</span>
+              ))}
+              <span className="text-[9px] text-muted italic self-center">not in current scan</span>
+            </div>
+          );
+        })()}
+      </div>
+
+      {/* Low-price filter */}
+      {lowPrice.length > 0 && (
+        <div>
+          <div className="flex items-center gap-2 mb-3">
+            <span className="text-sm font-black text-foreground uppercase">Low-Price Stocks (under ₹300)</span>
+            <span className="text-[9px] bg-accent/20 text-accent px-2 py-0.5 rounded font-bold">{lowPrice.length}</span>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+            {lowPrice.map(s => <StockCard key={s.symbol} s={s} />)}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

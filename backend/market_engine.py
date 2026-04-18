@@ -11,14 +11,38 @@ logger = logging.getLogger(__name__)
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
 
-# 30 high-liquidity NSE stocks
+# ── 100 NSE stocks: Nifty 50 + Nifty Next 50 + key midcaps ──────────────
 NIFTY_STOCKS = [
+    # ── Nifty 50 (50 stocks) ──
     "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS",
     "HINDUNILVR.NS", "ITC.NS", "SBIN.NS", "BHARTIARTL.NS", "KOTAKBANK.NS",
     "LT.NS", "AXISBANK.NS", "ASIANPAINT.NS", "MARUTI.NS", "SUNPHARMA.NS",
     "TITAN.NS", "WIPRO.NS", "HCLTECH.NS", "BAJFINANCE.NS", "TATAMOTORS.NS",
     "TATASTEEL.NS", "JSWSTEEL.NS", "TECHM.NS", "BEL.NS", "BPCL.NS",
     "NTPC.NS", "ONGC.NS", "ADANIENT.NS", "HINDALCO.NS", "COALINDIA.NS",
+    "ULTRACEMCO.NS", "NESTLEIND.NS", "POWERGRID.NS", "BAJAJFINSV.NS", "GRASIM.NS",
+    "DIVISLAB.NS", "DRREDDY.NS", "CIPLA.NS", "APOLLOHOSP.NS", "EICHERMOT.NS",
+    "HEROMOTOCO.NS", "BAJAJ-AUTO.NS", "TATACONSUM.NS", "HDFCLIFE.NS", "SBILIFE.NS",
+    "INDUSINDBK.NS", "BRITANNIA.NS", "M&M.NS", "VEDL.NS", "SHRIRAMFIN.NS",
+
+    # ── Nifty Next 50 / Midcap picks ──
+    "ADANIPORTS.NS", "ADANIPOWER.NS", "ADANIGREEN.NS", "ADANITRANS.NS",
+    "NAUKRI.NS", "ZOMATO.NS", "PAYTM.NS", "DMART.NS", "IRCTC.NS",
+    "PIDILITIND.NS", "BERGEPAINT.NS", "MUTHOOTFIN.NS", "RECLTD.NS", "PFC.NS",
+    "HAVELLS.NS", "VOLTAS.NS", "WHIRLPOOL.NS", "CROMPTON.NS", "POLYCAB.NS",
+    "MOTHERSON.NS", "BALKRISIND.NS", "MPHASIS.NS", "LTIM.NS", "PERSISTENT.NS",
+    "COFORGE.NS", "OFSS.NS", "KPIT.NS", "TATATECH.NS", "TIINDIA.NS",
+    "CHOLAFIN.NS", "SBICARD.NS", "IDFCFIRSTB.NS", "BANDHANBNK.NS", "FEDERALBNK.NS",
+    "CANBK.NS", "BANKBARODA.NS", "PNB.NS", "UNIONBANK.NS", "INDIANB.NS",
+    "GAIL.NS", "IOC.NS", "HINDPETRO.NS", "CONCOR.NS", "SAIL.NS",
+    "NMDC.NS", "NATIONALUM.NS", "JINDALSTEL.NS", "WELCORP.NS", "RATNAMANI.NS",
+    "ABBOTINDIA.NS", "AUROPHARMA.NS", "TORNTPHARM.NS", "LUPIN.NS", "BIOCON.NS",
+
+    # ── Small-cap / Short-term momentum picks (₹10–₹300 range) ──
+    "SUZLON.NS", "YESBANK.NS", "SOUTHINDBANK.NS", "IDBI.NS", "RPOWER.NS",
+    "JSWENERGY.NS", "TATAPOWER.NS", "NHPC.NS", "SJVN.NS", "IRFC.NS",
+    "NBCC.NS", "RVNL.NS", "IRCON.NS", "HFCL.NS",
+    "EASEMYTRIP.NS", "IXIGO.NS", "NYKAA.NS", "HONASA.NS",
 ]
 
 INDEX_SYMBOLS = {
@@ -143,15 +167,20 @@ def analyze_stock(symbol: str) -> Optional[dict]:
 
 
 def fetch_all_stocks(symbols: Optional[List[str]] = None) -> List[dict]:
-    """Analyze all stocks and return sorted by signal strength."""
+    """Analyze all stocks in parallel (up to 20 threads) and return sorted by signal strength."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     if symbols is None:
         symbols = NIFTY_STOCKS
 
     results = []
-    for symbol in symbols:
-        stock = analyze_stock(symbol)
-        if stock:
-            results.append(stock)
+    # Parallel fetch — 20 workers max so Yahoo doesn't rate-limit us
+    with ThreadPoolExecutor(max_workers=20) as ex:
+        futures = {ex.submit(analyze_stock, sym): sym for sym in symbols}
+        for fut in as_completed(futures):
+            stock = fut.result()
+            if stock:
+                results.append(stock)
 
     results.sort(key=lambda x: x["score"], reverse=True)
     return results

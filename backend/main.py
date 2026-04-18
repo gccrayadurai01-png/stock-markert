@@ -42,6 +42,25 @@ from auto_store import (
     get_strategy_performance, reset_strategy_performance,
 )
 
+# ── Crypto stack (fully isolated from stock trader) ─────────────────────
+from crypto_auto_trader import CryptoAutoTrader
+from crypto_store import (
+    load_crypto_config, save_crypto_config,
+    get_portfolio as get_crypto_portfolio,
+    get_open_positions as get_crypto_positions,
+    get_trade_journal as get_crypto_journal,
+    get_pending_signals as get_crypto_pending,
+    get_scan_history as get_crypto_scans,
+    get_portfolio_stats as get_crypto_stats,
+    get_daily_summaries as get_crypto_daily_summaries,
+    get_daily_summary_by_date as get_crypto_daily_summary,
+    update_portfolio_capital as update_crypto_capital,
+    get_strategy_performance as get_crypto_strategy_perf,
+    reset_strategy_performance as reset_crypto_strategy_perf,
+)
+
+import manual_trade_store
+
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -52,6 +71,7 @@ connected_clients: List[WebSocket] = []
 user_config: dict = load_config()
 executor = ThreadPoolExecutor(max_workers=4)
 auto_trader: Optional[AutoTrader] = None
+crypto_trader: Optional[CryptoAutoTrader] = None
 
 
 # ── Core Analysis Loop ─────────────────────────────────────────────────
@@ -226,11 +246,18 @@ async def _auto_trader_scheduler():
     """
     Auto-start Auto Trader at 9:15 AM IST, auto-stop at 3:30 PM IST.
     Runs every day, Monday–Friday. No manual toggle needed.
+    Checks immediately on startup, then every 60 seconds.
     """
     global auto_trader
     logger.info("📅 Auto Trader scheduler running — will start at 9:15 AM, stop at 3:30 PM IST")
 
+    first_run = True
     while True:
+        # On first run, check immediately. After that, sleep 60s between checks.
+        if not first_run:
+            await asyncio.sleep(60)
+        first_run = False
+
         now = datetime.now()
         weekday = now.weekday()  # 0=Mon … 4=Fri, 5=Sat, 6=Sun
 
@@ -258,9 +285,6 @@ async def _auto_trader_scheduler():
             cfg["enabled"] = False
             save_auto_config(cfg)
 
-        # Sleep 60 seconds between checks
-        await asyncio.sleep(60)
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -273,16 +297,13 @@ async def lifespan(app: FastAPI):
     # Start auto trader scheduler (auto-start 9:15 AM, auto-stop 3:30 PM)
     asyncio.create_task(_auto_trader_scheduler())
 
-    # Also immediately start if we're currently in market hours
+    # The scheduler handles starting/stopping — it checks immediately on first run.
+    # Do NOT start auto_trader here to avoid the double-start race condition.
     auto_cfg = load_auto_config()
     if _is_market_open():
-        logger.info("🔔 Server started during market hours — Auto Trader starting now...")
-        auto_cfg["enabled"] = True
-        save_auto_config(auto_cfg)
-        auto_trader = AutoTrader(auto_cfg)
-        asyncio.create_task(auto_trader.start())
+        logger.info("🔔 Server started during market hours — scheduler will start Auto Trader immediately")
     else:
-        logger.info(f"📅 Market is CLOSED — Auto Trader will start automatically at 9:15 AM IST")
+        logger.info("📅 Market is CLOSED — Auto Trader will start automatically at 9:15 AM IST")
 
     logger.info("🚀 Trading Command Center started (auto-schedule + 10-min refresh + manual)")
     yield
@@ -691,6 +712,54 @@ def reset_strategy_perf():
     return {"status": "reset"}
 
 
+@app.get("/api/auto-trader/journal/by-strategy/{strategy_key}")
+def get_journal_by_strategy(strategy_key: str, last_n: int = 100):
+    """Get all trade journal entries for a specific strategy key (e.g. 'A', 'A+B', 'E')."""
+    all_entries = get_trade_journal(last_n)
+    # Filter entries that match this strategy_key
+    filtered = [
+        e for e in all_entries
+        if e.get("strategy_key") == strategy_key
+        or e.get("action") in ("EXIT", "PARTIAL_EXIT")  # always include exits for context
+    ]
+    # For exits, only include ones that follow an entry for this strategy
+    # Simpler: just filter ENTER entries + all EXIT entries
+    enter_symbols = {e["symbol"] for e in all_entries if e.get("strategy_key") == strategy_key and e.get("action") == "ENTER"}
+    result = [
+        e for e in all_entries
+        if (e.get("strategy_key") == strategy_key and e.get("action") == "ENTER")
+        or (e.get("action") in ("EXIT", "PARTIAL_EXIT") and e.get("symbol") in enter_symbols)
+    ]
+    return result
+
+
+@app.get("/api/auto-trader/journal/by-date")
+def get_journal_by_date(last_n: int = 200):
+    """Get all journal entries grouped by date."""
+    from collections import defaultdict
+    all_entries = get_trade_journal(last_n)
+    grouped: dict = defaultdict(list)
+    for e in all_entries:
+        ts = e.get("timestamp", "")
+        date = ts[:10] if ts else "unknown"
+        grouped[date].append(e)
+    # Build summary per day
+    result = []
+    for date in sorted(grouped.keys(), reverse=True):
+        entries = grouped[date]
+        enters = [e for e in entries if e.get("action") == "ENTER"]
+        exits = [e for e in entries if e.get("action") in ("EXIT", "PARTIAL_EXIT")]
+        day_pnl = sum(e.get("pnl", 0) or 0 for e in exits)
+        result.append({
+            "date": date,
+            "trades_taken": len(enters),
+            "trades_exited": len(exits),
+            "day_pnl": round(day_pnl, 2),
+            "entries": entries,
+        })
+    return result
+
+
 @app.post("/api/auto-trader/strategy-config")
 def update_strategy_config(body: dict):
     """
@@ -703,6 +772,39 @@ def update_strategy_config(body: dict):
     if auto_trader:
         auto_trader.config = load_auto_config()
     return {"status": "saved", "config": load_auto_config()}
+
+
+@app.get("/api/eodhd/news")
+def get_eodhd_news(limit: int = 50):
+    """Get market news from EODHD (cached 2 hours — conserves free plan quota)."""
+    from eodhd_engine import get_market_news as _eodhd_news, cache_stats
+    news = _eodhd_news(limit=limit)
+    return {"news": news, "count": len(news), "cache": cache_stats()}
+
+
+@app.get("/api/eodhd/news/{symbol}")
+def get_eodhd_stock_news(symbol: str):
+    """Get stock-specific news from EODHD (1 API call — use sparingly)."""
+    from eodhd_engine import get_stock_news, get_news_sentiment_for_symbol
+    sym = symbol.replace(".NS", "").replace(".BO", "")
+    return {
+        "symbol": sym,
+        "news": get_stock_news(sym),
+        "sentiment": get_news_sentiment_for_symbol(sym),
+    }
+
+
+@app.get("/api/eodhd/status")
+def get_eodhd_status():
+    """EODHD API status and cache stats."""
+    from eodhd_engine import cache_stats, EODHD_KEY
+    import os
+    return {
+        "configured": bool(os.getenv("EODHD_API_KEY")),
+        "plan": "Free Starter (20 calls/day)",
+        "best_for": ["Market news (1 call = 50 items)", "EOD historical data", "Fundamental data"],
+        "cache": cache_stats(),
+    }
 
 
 @app.post("/api/auto-trader/smc-analyze/{symbol}")
@@ -819,6 +921,372 @@ async def force_scan_now():
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+
+# ── Manual Trade Endpoints ────────────────────────────────────────────
+
+@app.get("/api/manual-trades")
+def list_manual_trades():
+    return manual_trade_store.get_manual_trades()
+
+@app.post("/api/manual-trades")
+def create_manual_trade(trade: dict):
+    return manual_trade_store.save_manual_trade(trade)
+
+@app.post("/api/manual-trades/{trade_id}/exit")
+def exit_manual_trade(trade_id: str, body: dict):
+    return manual_trade_store.exit_manual_trade(trade_id, body.get("exit_price", 0), body.get("notes", ""))
+
+@app.delete("/api/manual-trades/{trade_id}")
+def delete_manual_trade_endpoint(trade_id: str):
+    manual_trade_store.delete_manual_trade(trade_id)
+    return {"status": "deleted"}
+
+
+# ══════════════════════════════════════════════════════════════════════
+# CRYPTO ENDPOINTS — completely isolated /api/crypto/* namespace
+# ══════════════════════════════════════════════════════════════════════
+
+# ── Market data ────────────────────────────────────────────────────────
+
+@app.get("/api/crypto/dashboard")
+async def crypto_dashboard():
+    """Unified crypto dashboard payload — coins + overview + news + sentiment."""
+    from crypto_engine import fetch_all_coins, fetch_market_overview, get_top_gainers, get_top_losers, get_buy_candidates, get_sell_candidates
+    from crypto_news_engine import fetch_crypto_news
+    from crypto_sentiment_engine import market_sentiment_overview
+
+    loop = asyncio.get_event_loop()
+    coins_f = loop.run_in_executor(executor, fetch_all_coins)
+    overview_f = loop.run_in_executor(executor, fetch_market_overview)
+    news_f = loop.run_in_executor(executor, fetch_crypto_news)
+    senti_f = loop.run_in_executor(executor, market_sentiment_overview)
+
+    coins, overview, news_data, senti = await asyncio.gather(
+        coins_f, overview_f, news_f, senti_f,
+        return_exceptions=True,
+    )
+
+    def _fallback(val, default):
+        return default if isinstance(val, Exception) else val
+
+    coins = _fallback(coins, [])
+    overview = _fallback(overview, {})
+    news_data = _fallback(news_data, {"news": [], "sentiment": {}, "trending": []})
+    senti = _fallback(senti, {})
+
+    return {
+        "coins": coins,
+        "overview": overview,
+        "sentiment_overview": senti,
+        "buy_candidates": get_buy_candidates(coins),
+        "sell_candidates": get_sell_candidates(coins),
+        "top_gainers": get_top_gainers(coins, 5),
+        "top_losers": get_top_losers(coins, 5),
+        "news": news_data.get("news", []),
+        "news_sentiment": news_data.get("sentiment", {}),
+        "trending": news_data.get("trending", []),
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
+@app.get("/api/crypto/overview")
+async def crypto_overview():
+    from crypto_engine import fetch_market_overview
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(executor, fetch_market_overview)
+
+
+@app.get("/api/crypto/coins")
+async def crypto_coins():
+    from crypto_engine import fetch_all_coins
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(executor, fetch_all_coins)
+
+
+@app.get("/api/crypto/coin/{symbol}")
+async def crypto_coin(symbol: str):
+    from crypto_engine import analyze_coin
+    loop = asyncio.get_event_loop()
+    sym = symbol.upper()
+    if not sym.endswith("USDT"):
+        sym = sym + "USDT"
+    result = await loop.run_in_executor(executor, lambda: analyze_coin(sym))
+    return result or {"error": f"{sym} not available"}
+
+
+@app.get("/api/crypto/chart/{symbol}")
+async def crypto_chart(symbol: str, interval: str = "1h", limit: int = 100):
+    from crypto_engine import fetch_chart_data
+    loop = asyncio.get_event_loop()
+    sym = symbol.upper()
+    if not sym.endswith("USDT"):
+        sym = sym + "USDT"
+    result = await loop.run_in_executor(
+        executor, lambda: fetch_chart_data(sym, interval=interval, limit=limit)
+    )
+    return result or {"error": f"No chart data for {sym}"}
+
+
+@app.get("/api/crypto/news")
+async def crypto_news(limit: int = 30):
+    from crypto_news_engine import fetch_crypto_news
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(executor, lambda: fetch_crypto_news(max_items=limit))
+
+
+@app.get("/api/crypto/sentiment")
+async def crypto_sentiment():
+    """F&G, funding rates, BTC dominance, altseason."""
+    from crypto_sentiment_engine import market_sentiment_overview
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(executor, market_sentiment_overview)
+
+
+@app.get("/api/crypto/coin/{symbol}/investors")
+async def crypto_coin_investors(symbol: str):
+    """Run all 8 crypto investor lenses on a single coin."""
+    from crypto_engine import analyze_coin
+    from crypto_sentiment_engine import market_sentiment_overview
+    from crypto_investor_perspectives import analyze_through_crypto_investor_lenses
+
+    sym = symbol.upper()
+    if not sym.endswith("USDT"):
+        sym = sym + "USDT"
+
+    loop = asyncio.get_event_loop()
+    coin = await loop.run_in_executor(executor, lambda: analyze_coin(sym))
+    if not coin:
+        return {"error": f"{sym} not available"}
+
+    market_ctx = await loop.run_in_executor(executor, market_sentiment_overview)
+    indicators = coin.get("indicators", {})
+    result = await loop.run_in_executor(
+        executor,
+        lambda: analyze_through_crypto_investor_lenses(coin, indicators, market_ctx),
+    )
+    return {"coin": coin, "analysis": result, "market_context": market_ctx}
+
+
+@app.post("/api/crypto/smc-analyze/{symbol}")
+async def crypto_smc_analyze(symbol: str, interval: str = "15m"):
+    from crypto_smc_engine import analyze_crypto_smc
+    loop = asyncio.get_event_loop()
+    sym = symbol.upper()
+    if not sym.endswith("USDT"):
+        sym = sym + "USDT"
+    return await loop.run_in_executor(
+        executor, lambda: analyze_crypto_smc(sym, interval=interval)
+    )
+
+
+# ── Auto trader (mirror of /api/auto-trader/*) ─────────────────────────
+
+@app.post("/api/crypto/auto-trader/toggle")
+async def crypto_trader_toggle(body: dict):
+    global crypto_trader
+    enabled = body.get("enabled", False)
+
+    if enabled and not crypto_trader:
+        cfg = load_crypto_config()
+        cfg["enabled"] = True
+        save_crypto_config(cfg)
+        crypto_trader = CryptoAutoTrader(cfg)
+        asyncio.create_task(crypto_trader.start())
+        return {"status": "started", "enabled": True}
+    elif not enabled and crypto_trader:
+        await crypto_trader.stop()
+        crypto_trader = None
+        cfg = load_crypto_config()
+        cfg["enabled"] = False
+        save_crypto_config(cfg)
+        return {"status": "stopped", "enabled": False}
+    return {"status": "no_change", "enabled": crypto_trader is not None}
+
+
+@app.get("/api/crypto/auto-trader/status")
+def crypto_trader_status():
+    if crypto_trader:
+        return crypto_trader.get_status()
+    cfg = load_crypto_config()
+    return {
+        "enabled": False, "running": False, "test_mode": cfg.get("test_mode", True),
+        "positions": [], "pending_signals": [],
+        "capital": cfg.get("capital", 10000),
+        "cash_available": cfg.get("capital", 10000),
+        "today_pnl": 0, "total_pnl": 0, "portfolio_heat": 0,
+        "stats": get_crypto_stats(), "scan_count": 0,
+        "strategy_config": {
+            "active_strategies": cfg.get("active_strategies", ["A", "B", "C", "D", "E", "F"]),
+            "strategy_mode": cfg.get("strategy_mode", "ANY_TRIGGERS"),
+            "strategy_min_scores": cfg.get("strategy_min_scores", {}),
+        },
+        "scan_interval_seconds": cfg.get("scan_interval_seconds", 120),
+    }
+
+
+@app.get("/api/crypto/auto-trader/config")
+def crypto_trader_config():
+    return load_crypto_config()
+
+
+@app.post("/api/crypto/auto-trader/config")
+def crypto_trader_save_config(config: dict):
+    old_cfg = load_crypto_config()
+    save_crypto_config(config)
+    new_cfg = load_crypto_config()
+    new_capital = new_cfg.get("capital")
+    if new_capital and new_capital != old_cfg.get("capital"):
+        update_crypto_capital(new_capital)
+    if crypto_trader:
+        crypto_trader.config = new_cfg
+    return {"status": "saved", "config": new_cfg}
+
+
+@app.post("/api/crypto/auto-trader/strategy-config")
+def crypto_trader_strategy_config(body: dict):
+    """Update active strategies + thresholds."""
+    allowed = {"active_strategies", "strategy_mode", "strategy_min_scores"}
+    filtered = {k: v for k, v in body.items() if k in allowed}
+    save_crypto_config(filtered)
+    if crypto_trader:
+        crypto_trader.config = load_crypto_config()
+    return {"status": "saved", "config": load_crypto_config()}
+
+
+@app.get("/api/crypto/auto-trader/portfolio")
+def crypto_trader_portfolio():
+    return get_crypto_portfolio()
+
+
+@app.get("/api/crypto/auto-trader/positions")
+def crypto_trader_positions():
+    return get_crypto_positions()
+
+
+@app.get("/api/crypto/auto-trader/journal")
+def crypto_trader_journal(last_n: int = 50):
+    return get_crypto_journal(last_n)
+
+
+@app.get("/api/crypto/auto-trader/journal/stats")
+def crypto_trader_journal_stats():
+    return get_crypto_stats()
+
+
+@app.get("/api/crypto/auto-trader/pending-signals")
+def crypto_trader_pending():
+    return get_crypto_pending()
+
+
+@app.get("/api/crypto/auto-trader/scan-history")
+def crypto_trader_scans(last_n: int = 20):
+    return get_crypto_scans(last_n)
+
+
+@app.get("/api/crypto/auto-trader/strategy-performance")
+def crypto_trader_strategy_performance():
+    return get_crypto_strategy_perf()
+
+
+@app.post("/api/crypto/auto-trader/strategy-performance/reset")
+def crypto_trader_strategy_reset():
+    reset_crypto_strategy_perf()
+    return {"status": "reset"}
+
+
+@app.get("/api/crypto/auto-trader/performance")
+def crypto_trader_performance():
+    return {
+        "stats": get_crypto_stats(),
+        "daily_summaries": get_crypto_daily_summaries(30),
+    }
+
+
+@app.get("/api/crypto/auto-trader/daily-summaries")
+def crypto_trader_daily_summaries(last_n: int = 30):
+    return get_crypto_daily_summaries(last_n)
+
+
+@app.get("/api/crypto/auto-trader/daily-summary/{target_date}")
+def crypto_trader_daily_summary(target_date: str):
+    summary = get_crypto_daily_summary(target_date)
+    return summary or {"error": f"No summary found for {target_date}"}
+
+
+@app.post("/api/crypto/auto-trader/scan-now")
+async def crypto_trader_scan_now():
+    """Force a scan cycle (works 24/7)."""
+    global crypto_trader
+    if not crypto_trader:
+        cfg = load_crypto_config()
+        crypto_trader = CryptoAutoTrader(cfg)
+        crypto_trader.running = True
+    try:
+        await crypto_trader.scan_cycle()
+        return {
+            "status": "scan_complete",
+            "scan_count": crypto_trader.scan_count,
+            "last_scan": crypto_trader.last_scan.isoformat() if crypto_trader.last_scan else None,
+            "data": crypto_trader.last_scan_data,
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/api/crypto/auto-trader/generate-summary")
+async def crypto_trader_generate_summary():
+    """Generate AI daily summary on demand (persists via save_daily_summary)."""
+    global crypto_trader
+    from crypto_store import save_daily_summary as save_crypto_daily
+    if not crypto_trader:
+        cfg = load_crypto_config()
+        crypto_trader = CryptoAutoTrader(cfg)
+    try:
+        summary = await crypto_trader._generate_daily_summary()
+        save_crypto_daily(summary)
+        return {"status": "generated", "summary": summary}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/api/crypto/auto-trader/journal/by-strategy/{strategy_key}")
+def crypto_journal_by_strategy(strategy_key: str, last_n: int = 100):
+    all_entries = get_crypto_journal(last_n)
+    enter_symbols = {
+        e["symbol"] for e in all_entries
+        if e.get("strategy_key") == strategy_key and e.get("action") == "ENTER"
+    }
+    return [
+        e for e in all_entries
+        if (e.get("strategy_key") == strategy_key and e.get("action") == "ENTER")
+        or (e.get("action") in ("EXIT", "PARTIAL_EXIT") and e.get("symbol") in enter_symbols)
+    ]
+
+
+@app.get("/api/crypto/auto-trader/journal/by-date")
+def crypto_journal_by_date(last_n: int = 200):
+    from collections import defaultdict
+    all_entries = get_crypto_journal(last_n)
+    grouped: dict = defaultdict(list)
+    for e in all_entries:
+        ts = e.get("timestamp", "")
+        d = ts[:10] if ts else "unknown"
+        grouped[d].append(e)
+    result = []
+    for d in sorted(grouped.keys(), reverse=True):
+        entries = grouped[d]
+        enters = [e for e in entries if e.get("action") == "ENTER"]
+        exits = [e for e in entries if e.get("action") in ("EXIT", "PARTIAL_EXIT")]
+        day_pnl = sum(e.get("pnl", 0) or 0 for e in exits)
+        result.append({
+            "date": d,
+            "trades_taken": len(enters),
+            "trades_exited": len(exits),
+            "day_pnl": round(day_pnl, 4),
+            "entries": entries,
+        })
+    return result
 
 
 # ── WebSocket ──────────────────────────────────────────────────────────

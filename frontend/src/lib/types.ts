@@ -296,6 +296,7 @@ export interface AutoTraderData {
   risk_status: { can_trade: boolean; reason: string; max_positions?: number; positions?: number; portfolio_heat?: number; cash_available?: number };
   intelligence?: AutoTraderIntelligence;
   strategy_config?: StrategyConfig;
+  scan_interval_seconds?: number;
 }
 
 // ── Strategy / SMC Types ───────────────────────────────────────────────
@@ -439,8 +440,272 @@ export interface DailySummary {
   fii_dii?: FIIDIIData;
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// CRYPTO TYPES — mirrors stock shapes but with crypto-native fields
+// ══════════════════════════════════════════════════════════════════════
+
+export type CryptoSignal = "STRONG_BUY" | "BUY" | "NEUTRAL" | "SELL" | "STRONG_SELL" | "NO_DATA";
+
+export interface CryptoAnalysis {
+  symbol: string;          // e.g. "BTCUSDT"
+  name: string;            // e.g. "Bitcoin"
+  price: number;
+  prev_close: number;
+  change_percent: number;
+  change_24h_pct: number;
+  high_24h: number;
+  low_24h: number;
+  volume_24h_usd: number;
+  trades_24h: number;
+  signal: CryptoSignal;
+  score: number;
+  confidence: number;
+  stop_loss: number;
+  target_1: number;
+  target_2: number;
+  atr: number;
+  votes: { BUY: number; SELL: number; NEUTRAL: number };
+  indicators: Record<string, unknown>;
+}
+
+export interface CryptoMarketOverview {
+  btc_price: number;
+  btc_change_24h: number;
+  btc_high_24h: number;
+  btc_low_24h: number;
+  eth_price: number;
+  eth_change_24h: number;
+  total_market_cap_usd: number;
+  total_volume_24h_usd: number;
+  btc_dominance: number;
+  eth_dominance: number;
+  market_cap_change_24h_pct: number;
+  active_cryptocurrencies: number;
+  fear_greed_value: number;
+  fear_greed_classification: string;
+  market_status: "OPEN";
+}
+
+export interface CryptoSentimentOverview {
+  fear_greed_value: number | null;
+  fear_greed_label: string;
+  fear_greed_bias: string;
+  btc_dominance: number;
+  eth_dominance: number;
+  altseason: "ACTIVE" | "APPROACHING" | "OFF";
+  btc_funding_pct: number;
+  eth_funding_pct: number;
+  market_cap_change_24h_pct: number;
+  overall_bias: string;
+  narrative: string;
+}
+
+export interface CryptoNewsItem {
+  headline: string;
+  source: string;
+  url: string;
+  published: string;
+  sentiment: "BULLISH" | "BEARISH" | "NEUTRAL";
+  affected_coins: string[];
+  narratives: string[];
+}
+
+export interface CryptoTrendingCoin {
+  id: string;
+  name: string;
+  symbol: string;
+  market_cap_rank: number | null;
+  thumb: string;
+}
+
+export interface CryptoDashboardData {
+  coins: CryptoAnalysis[];
+  overview: CryptoMarketOverview;
+  sentiment_overview: CryptoSentimentOverview;
+  buy_candidates: CryptoAnalysis[];
+  sell_candidates: CryptoAnalysis[];
+  top_gainers: CryptoAnalysis[];
+  top_losers: CryptoAnalysis[];
+  news: CryptoNewsItem[];
+  news_sentiment: {
+    sentiment: string;
+    bullish: number;
+    bearish: number;
+    neutral: number;
+    total: number;
+  };
+  trending: CryptoTrendingCoin[];
+  timestamp: string;
+}
+
+// Chart
+export interface CryptoCandle {
+  date: number;    // unix ms
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+export interface CryptoChartData {
+  symbol: string;
+  name: string;
+  interval: string;
+  candles: CryptoCandle[];
+  error?: string;
+}
+
+// Auto trader
+export interface CryptoPosition {
+  symbol: string;
+  name: string;
+  entry_price: number;
+  entry_time: string;
+  units: number;                 // fractional
+  capital_deployed: number;
+  stop_loss: number;
+  trailing_stop: number;
+  target_1: number;
+  target_2: number;
+  target_1_hit: boolean;
+  partial_exit_done: boolean;
+  confluence_score: number;
+  entry_reasoning: string[];
+  current_price: number;
+  unrealized_pnl: number;
+  unrealized_pnl_pct: number;
+  status: "OPEN" | "PARTIAL_EXIT" | "CLOSED";
+  atr: number;
+  strategy_key?: string;
+  strategies_confirmed?: string[];
+  strategy_scores?: Record<string, number>;
+}
+
+export interface CryptoPendingSignal {
+  symbol: string;
+  name: string;
+  price: number;
+  confluence_score: number;
+  strategy_id?: string;
+  strategy_key?: string;
+  strategy_name?: string;
+  missing: string[];
+  met_conditions: string[];
+  strategy_scores?: Record<string, number>;
+  strategies_confirmed?: string[];
+}
+
+export interface CryptoJournalEntry {
+  timestamp: string;
+  symbol: string;
+  action: "ENTER" | "EXIT" | "PARTIAL_EXIT" | "SKIP";
+  confluence_score?: number;
+  entry_price?: number;
+  exit_price?: number;
+  pnl?: number;
+  pnl_pct?: number;
+  reasoning: string[];
+  hold_duration_minutes?: number;
+  strategy_key?: string;
+  strategy_name?: string;
+  units?: number;
+  stop_loss?: number;
+  target_1?: number;
+}
+
+export interface CryptoAutoTraderStats {
+  total_trades: number;
+  winning_trades: number;
+  losing_trades: number;
+  win_rate: number;
+  total_pnl: number;
+  total_pnl_pct: number;
+  avg_win: number;
+  avg_loss: number;
+  best_trade: { symbol: string; pnl: number } | null;
+  worst_trade: { symbol: string; pnl: number } | null;
+  avg_hold_time_minutes?: number;
+  max_drawdown: number;
+}
+
+export type CryptoStrategyId = "A" | "B" | "C" | "D" | "E" | "F";
+
+export interface CryptoStrategyConfig {
+  active_strategies: CryptoStrategyId[];
+  strategy_mode: "ANY_TRIGGERS" | "ALL_REQUIRED";
+  strategy_min_scores: Partial<Record<CryptoStrategyId, number>>;
+}
+
+export interface CryptoAutoTraderIntelligence {
+  news_articles: number;
+  market_sentiment: string;
+  news_last_updated: string | null;
+  ai_enabled: boolean;
+  indicators_active: number;
+  investor_perspectives: number;
+  market_overview?: CryptoSentimentOverview;
+}
+
+export interface CryptoAutoTraderData {
+  enabled: boolean;
+  running: boolean;
+  test_mode: boolean;
+  scan_count: number;
+  last_scan: string | null;
+  positions: CryptoPosition[];
+  pending_signals: CryptoPendingSignal[];
+  capital: number;
+  cash_available: number;
+  today_pnl: number;
+  total_pnl: number;
+  portfolio_heat: number;
+  stats: CryptoAutoTraderStats;
+  risk_status: {
+    can_trade: boolean;
+    reason: string;
+    max_positions?: number;
+    positions?: number;
+    portfolio_heat?: number;
+    cash_available?: number;
+  };
+  intelligence?: CryptoAutoTraderIntelligence;
+  strategy_config?: CryptoStrategyConfig;
+  strategy_performance?: StrategyPerformanceMap;
+  scan_interval_seconds?: number;
+}
+
+export interface CryptoInvestorPerspective {
+  investor: string;
+  signal: string;
+  confidence: number;
+  reasoning: string;
+  style: string;
+}
+
+export interface CryptoInvestorConsensus {
+  bullish_count: number;
+  bearish_count: number;
+  neutral_count: number;
+  total_count: number;
+  avg_confidence: number;
+  confidence_boost: number;
+  aggregate_signal: string;
+  key_insight: string;
+}
+
+export interface CryptoInvestorAnalysis {
+  symbol: string;
+  investor_perspectives: CryptoInvestorPerspective[];
+  consensus: CryptoInvestorConsensus;
+}
+
+// Platform selector
+export type Platform = "stocks" | "crypto";
+
 // Navigation
 export type ScreenTab = "dashboard" | "intraday" | "swing" | "positional" | "options" | "portfolio" | "news" | "auto-trader";
+export type CryptoScreenTab = "dashboard" | "scanner" | "portfolio" | "auto-trader" | "chart" | "news" | "investors" | "strategy-lab";
 
 export interface DashboardData {
   timestamp: string;

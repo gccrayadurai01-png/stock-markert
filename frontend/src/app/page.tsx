@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useDashboard } from "@/hooks/useDashboard";
-import type { ScreenTab } from "@/lib/types";
+import type { ScreenTab, Platform } from "@/lib/types";
 import Sidebar from "@/components/Sidebar";
 import ConfigPanel from "@/components/ConfigPanel";
 import MarketOverview from "@/components/MarketOverview";
@@ -18,6 +18,8 @@ import PortfolioDashboard from "@/components/PortfolioDashboard";
 import NewsAlerts from "@/components/NewsAlerts";
 import LoginPage from "@/components/LoginPage";
 import AutoTraderDashboard from "@/components/AutoTraderDashboard";
+import PlatformSelector from "@/components/PlatformSelector";
+import CryptoDashboardScreen from "@/components/CryptoDashboardScreen";
 import { LogOut } from "lucide-react";
 
 export default function Dashboard() {
@@ -25,13 +27,17 @@ export default function Dashboard() {
   const [activeTab, setActiveTab] = useState<ScreenTab>("dashboard");
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [userEmail, setUserEmail] = useState("");
+  const [platform, setPlatform] = useState<Platform | null>(null);
 
   useEffect(() => {
-    // Check if user is logged in from localStorage
     const savedEmail = localStorage.getItem("user_email");
+    const savedPlatform = localStorage.getItem("trading_platform") as Platform | null;
     if (savedEmail) {
       setUserEmail(savedEmail);
       setIsLoggedIn(true);
+    }
+    if (savedPlatform === "stocks" || savedPlatform === "crypto") {
+      setPlatform(savedPlatform);
     }
   }, []);
 
@@ -39,18 +45,58 @@ export default function Dashboard() {
     setUserEmail(email);
     setIsLoggedIn(true);
     localStorage.setItem("user_email", email);
+    // Don't auto-set platform — let user pick each session (or restore saved)
+    const saved = localStorage.getItem("trading_platform") as Platform | null;
+    if (saved === "stocks" || saved === "crypto") {
+      setPlatform(saved);
+    }
+  };
+
+  const handleSelectPlatform = (p: Platform) => {
+    setPlatform(p);
+    localStorage.setItem("trading_platform", p);
+  };
+
+  const handleSwitchPlatform = (p: Platform) => {
+    setPlatform(p);
+    localStorage.setItem("trading_platform", p);
   };
 
   const handleLogout = () => {
     setIsLoggedIn(false);
     setUserEmail("");
+    setPlatform(null);
     localStorage.removeItem("user_email");
+    localStorage.removeItem("trading_platform");
   };
 
+  // ── Not logged in ──
   if (!isLoggedIn) {
     return <LoginPage onLoginSuccess={handleLoginSuccess} />;
   }
 
+  // ── Platform picker ──
+  if (!platform) {
+    return (
+      <PlatformSelector
+        userEmail={userEmail}
+        onSelect={handleSelectPlatform}
+        onLogout={handleLogout}
+      />
+    );
+  }
+
+  // ── Crypto platform ──
+  if (platform === "crypto") {
+    return (
+      <CryptoDashboardScreen
+        onSwitchPlatform={handleSwitchPlatform}
+        onLogout={handleLogout}
+      />
+    );
+  }
+
+  // ── Stocks platform ──
   if (loading && !data) {
     return (
       <div className="flex items-center justify-center min-h-screen bg-background">
@@ -76,13 +122,9 @@ export default function Dashboard() {
 
   return (
     <div className="min-h-screen bg-background flex">
-      {/* Sidebar (desktop) / Mobile nav handled inside Sidebar */}
       <Sidebar activeTab={activeTab} onTabChange={setActiveTab} connected={connected} />
 
-      {/* Main Content */}
-      {/* pt-14 on mobile = space for fixed top bar; pb-20 = space for bottom nav */}
       <div className="flex-1 min-w-0 pt-14 md:pt-0 pb-20 md:pb-0">
-        {/* Top Config Bar */}
         <ConfigPanel
           capital={data?.user_capital ?? 100000}
           riskPercent={data?.risk_per_trade ?? 1}
@@ -96,7 +138,6 @@ export default function Dashboard() {
         />
 
         <main className="max-w-[1920px] mx-auto px-4 py-5 space-y-6">
-          {/* Dashboard Screen */}
           {activeTab === "dashboard" && (
             <>
               <MarketOverview data={market} keyLevels={data?.key_levels ?? {}} bias={data?.market_verdict ?? "NEUTRAL"} />
@@ -149,7 +190,7 @@ export default function Dashboard() {
                     </div>
                   )}
                 </div>
-              )}
+          )}
 
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                 <div className="lg:col-span-2 space-y-6">
@@ -165,12 +206,10 @@ export default function Dashboard() {
             </>
           )}
 
-          {/* Mode Screens */}
           {(activeTab === "intraday" || activeTab === "swing" || activeTab === "positional" || activeTab === "options") && data && (
             <ModeScreen mode={activeTab} data={data} onConfigUpdate={updateConfig} />
           )}
 
-          {/* Portfolio Screen */}
           {activeTab === "portfolio" && (
             <PortfolioDashboard
               capital={data?.user_capital ?? 100000}
@@ -180,12 +219,8 @@ export default function Dashboard() {
             />
           )}
 
-          {/* Auto Trader Screen */}
-          {activeTab === "auto-trader" && (
-            <AutoTraderDashboard />
-          )}
+          {activeTab === "auto-trader" && <AutoTraderDashboard />}
 
-          {/* News Screen */}
           {activeTab === "news" && (
             <NewsAlerts
               news={data?.news ?? []}
@@ -196,7 +231,6 @@ export default function Dashboard() {
             />
           )}
 
-          {/* Footer */}
           <footer className="text-center py-4 border-t border-border">
             <p className="text-[10px] text-muted">Personal use only. Not financial advice. All trading involves risk.</p>
           </footer>

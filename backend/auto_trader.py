@@ -196,28 +196,23 @@ class AutoTrader:
                             "strategy_scores": all_scores,
                         }
 
-                        # AI confirmation for high-score trades (score >= 80)
-                        ai_reasoning = "N/A"
-                        if best_score >= 80 and self.config.get("use_ai_confirmation", True):
+                        # ── AI confirmation logic ──────────────────────────────
+                        # Score >= 70 → AUTO-APPROVE, no AI needed (strategy already validated)
+                        # Score 55-69 → AI as soft check (warning only, never blocks)
+                        # Score < 55  → No trade (below threshold)
+                        ai_reasoning = "Auto-approved — high confidence score"
+                        if best_score >= 70:
+                            # High confidence: skip AI entirely, trust the strategy score
+                            logger.info(f"✅ Auto-approved {stock['symbol']} score={best_score}/100 (≥70 threshold, AI skipped)")
+                        elif self.config.get("use_ai_confirmation", True):
+                            # Borderline score: ask AI but treat as advisory only (never blocks)
                             try:
                                 ai_result = await self._get_ai_confirmation(stock, entry_analysis)
+                                ai_reasoning = ai_result.get("reasoning", "AI advisory check done")
                                 if not ai_result.get("confirmed", True):
-                                    ai_reasoning = ai_result.get("reasoning", "Rejected")
-                                    pending_signals.append({
-                                        "symbol": stock["symbol"],
-                                        "name": stock.get("name", ""),
-                                        "price": stock.get("price", 0),
-                                        "confluence_score": best_score,
-                                        "strategy_id": best_id,
-                                        "strategy_key": combo_key,
-                                        "strategy_name": combo_name,
-                                        "missing": [f"AI rejected: {ai_reasoning}"],
-                                        "met_conditions": all_reasons[:4],
-                                        "strategy_scores": all_scores,
-                                        "strategies_confirmed": fired,
-                                    })
-                                    continue
-                                ai_reasoning = ai_result.get("reasoning", "Approved")
+                                    # Log the AI concern but DO NOT block — advisory only
+                                    ai_reasoning = f"⚠️ AI note: {ai_result.get('reasoning', '')} (trade proceeds on score)"
+                                    logger.info(f"⚠️ AI advisory for {stock['symbol']}: {ai_reasoning}")
                             except Exception as e:
                                 logger.warning(f"AI confirmation error for {stock['symbol']}: {e}")
 
@@ -376,17 +371,17 @@ class AutoTrader:
             ind = stock.get("indicators", {})
             news_info = self._get_stock_news_sentiment(stock["symbol"])
 
-            prompt = f"""You are a RISK MANAGER for an automated paper trading system.
-A trade has scored {analysis['confluence']}/110 confluence. Review and APPROVE or REJECT.
+            prompt = f"""You are a TRADING ASSISTANT for a paper trading system.
+A borderline trade scored {analysis['confluence']}/100. Give your opinion — but note this is PAPER TRADING so be reasonably permissive.
 
 STOCK: {stock.get('name', '')} ({stock['symbol']})
 PRICE: ₹{stock.get('price', 0):.2f}
 CHANGE: {stock.get('change_percent', 0):.2f}%
 
-CONFLUENCE REASONS (why system wants to buy):
+WHY THE SYSTEM WANTS TO BUY:
 {json.dumps(analysis['reasons'], indent=2)}
 
-MISSING CONDITIONS:
+WHAT'S MISSING:
 {json.dumps(analysis.get('missing', []), indent=2)}
 
 KEY INDICATORS:
@@ -394,14 +389,17 @@ KEY INDICATORS:
 - MACD: {ind.get('macd', {}).get('vote', 'N/A')}
 - Supertrend: {ind.get('supertrend', {}).get('direction', 'N/A')}
 - ADX: {ind.get('adx', {}).get('adx', 'N/A')}
-- Volume Spike: {ind.get('volume', {}).get('spike', 'N/A')}
+- Volume ratio: {ind.get('volume', {}).get('ratio', 'N/A')}x
 
-NEWS SENTIMENT: {news_info.get('sentiment', 'N/A')}
-NEWS HEADLINES: {json.dumps(news_info.get('headlines', [])[:3])}
+NEWS: {news_info.get('sentiment', 'N/A')}
+MARKET: {self._cached_sentiment.get('sentiment', 'N/A')}
 
-MARKET SENTIMENT: {self._cached_sentiment.get('sentiment', 'N/A')}
+Rules:
+- confirmed=true if the setup looks reasonable for a paper trade
+- Only say confirmed=false if there is a CLEAR bearish signal or obvious trap
+- Minor missing conditions (low volume, weak ADX) are NOT reasons to reject
 
-Respond ONLY with JSON: {{"confirmed": true/false, "reasoning": "one sentence why"}}"""
+Respond ONLY with JSON: {{"confirmed": true, "reasoning": "one sentence why"}}"""
 
             loop = asyncio.get_event_loop()
 
@@ -766,12 +764,33 @@ Respond ONLY with JSON: {{"confirmed": true/false, "reasoning": "one sentence wh
         vol_ratio = ind.get("volume", {}).get("ratio", 1.0)
         supertrend = ind.get("supertrend", {}).get("direction", "")
 
-        # ── News sentiment (stock-specific) — 40 pts ──
+        # ── News sentiment — 40 pts (EODHD + local scraper combined) ──
+        # 1. Try EODHD news (best quality, free plan covers market news)
+        eodhd_sent = {"score": 50, "label": "NEUTRAL", "count": 0, "headlines": []}
+        try:
+            from eodhd_engine import get_news_sentiment_for_symbol
+            sym_short = symbol.replace(".NS", "").replace(".BO", "")
+            eodhd_sent = get_news_sentiment_for_symbol(sym_short)
+        except Exception:
+            pass
+
+        # 2. Local scraper for stock-specific news
         news_data = self._get_stock_news_sentiment(symbol)
         news_sent = news_data.get("sentiment", "NEUTRAL")
         is_specific = not news_data.get("market_level", True)
 
-        if is_specific and news_sent == "BULLISH":
+        # Combine both signals
+        if eodhd_sent["count"] > 0:
+            if eodhd_sent["label"] == "BULLISH":
+                pts = min(30, 15 + eodhd_sent["count"] * 5)
+                score += pts
+                h = eodhd_sent["headlines"][0][:70] if eodhd_sent["headlines"] else "EODHD: positive coverage"
+                reasons.append(f"[D] EODHD: {eodhd_sent['count']} positive articles ({eodhd_sent['score']}% bullish): {h}")
+            elif eodhd_sent["label"] == "BEARISH":
+                score -= 15; missing.append(f"[D] EODHD: bearish coverage ({eodhd_sent['score']}% bearish)")
+            else:
+                score += 5; reasons.append(f"[D] EODHD: neutral coverage ({eodhd_sent['count']} mentions)")
+        elif is_specific and news_sent == "BULLISH":
             bull_count = news_data.get("bullish", 1)
             headlines = news_data.get("headlines", [])
             pts = min(40, 25 + bull_count * 5)
@@ -1562,6 +1581,7 @@ Respond ONLY with JSON (no markdown):
                 "strategy_min_scores": self.config.get("strategy_min_scores", {}),
             },
             "strategy_performance": self._get_strategy_performance_summary(),
+            "scan_interval_seconds": self.config.get("scan_interval_seconds", 120),
         }
 
     def _get_strategy_performance_summary(self) -> dict:
