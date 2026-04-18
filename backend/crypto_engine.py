@@ -110,7 +110,7 @@ def fetch_global_data() -> dict:
     try:
         r = httpx.get(f"{COINGECKO}/global", headers=HEADERS, timeout=8)
         if r.status_code != 200:
-            return {"total_market_cap_usd": 0, "btc_dominance": 0, "total_volume_24h_usd": 0}
+            return {"total_market_cap_usd": 0, "btc_dominance": 0, "eth_dominance": 0, "total_volume_24h_usd": 0, "active_cryptocurrencies": 0, "market_cap_change_24h_pct": 0}
         data = r.json().get("data", {})
         return {
             "total_market_cap_usd": data.get("total_market_cap", {}).get("usd", 0),
@@ -123,7 +123,7 @@ def fetch_global_data() -> dict:
         }
     except Exception as e:
         logger.error(f"CoinGecko global error: {e}")
-        return {"total_market_cap_usd": 0, "btc_dominance": 0, "total_volume_24h_usd": 0}
+        return {"total_market_cap_usd": 0, "btc_dominance": 0, "eth_dominance": 0, "total_volume_24h_usd": 0, "active_cryptocurrencies": 0, "market_cap_change_24h_pct": 0}
 
 
 def fetch_top_coins(limit: int = 30) -> List[dict]:
@@ -335,8 +335,8 @@ def fetch_market_overview() -> dict:
         "eth_change_24h": round(float(eth_ticker.get("priceChangePercent", 0)), 2),
         "total_market_cap_usd": global_data["total_market_cap_usd"],
         "total_volume_24h_usd": global_data["total_volume_24h_usd"],
-        "btc_dominance": global_data["btc_dominance"],
-        "eth_dominance": global_data["eth_dominance"],
+        "btc_dominance": global_data.get("btc_dominance", 0),
+        "eth_dominance": global_data.get("eth_dominance", 0),
         "market_cap_change_24h_pct": global_data.get("market_cap_change_24h_pct", 0),
         "active_cryptocurrencies": global_data.get("active_cryptocurrencies", 0),
         "fear_greed_value": fng["value"],
