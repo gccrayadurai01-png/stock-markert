@@ -704,7 +704,7 @@ export interface CryptoInvestorAnalysis {
 export type Platform = "stocks" | "crypto";
 
 // Navigation
-export type ScreenTab = "dashboard" | "intraday" | "swing" | "positional" | "options" | "portfolio" | "news" | "auto-trader";
+export type ScreenTab = "dashboard" | "intraday" | "swing" | "positional" | "options" | "portfolio" | "news" | "auto-trader" | "strategy-lab";
 export type CryptoScreenTab = "dashboard" | "scanner" | "portfolio" | "auto-trader" | "chart" | "news" | "investors" | "strategy-lab";
 
 export interface DashboardData {

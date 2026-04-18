@@ -20,6 +20,7 @@ import LoginPage from "@/components/LoginPage";
 import AutoTraderDashboard from "@/components/AutoTraderDashboard";
 import PlatformSelector from "@/components/PlatformSelector";
 import CryptoDashboardScreen from "@/components/CryptoDashboardScreen";
+import StockStrategyLab from "@/components/StockStrategyLab";
 import { LogOut } from "lucide-react";
 
 export default function Dashboard() {
@@ -122,7 +123,13 @@ export default function Dashboard() {
 
   return (
     <div className="min-h-screen bg-background flex">
-      <Sidebar activeTab={activeTab} onTabChange={setActiveTab} connected={connected} />
+      <Sidebar
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
+        connected={connected}
+        onSwitchPlatform={() => handleSwitchPlatform("crypto")}
+        onLogout={handleLogout}
+      />
 
       <div className="flex-1 min-w-0 pt-14 md:pt-0 pb-20 md:pb-0">
         <ConfigPanel
@@ -220,6 +227,8 @@ export default function Dashboard() {
           )}
 
           {activeTab === "auto-trader" && <AutoTraderDashboard />}
+
+          {activeTab === "strategy-lab" && <StockStrategyLab />}
 
           {activeTab === "news" && (
             <NewsAlerts
