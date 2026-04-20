@@ -700,11 +700,188 @@ export interface CryptoInvestorAnalysis {
   consensus: CryptoInvestorConsensus;
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// FOREX TYPES — mirrors crypto/stock shapes but with forex-native fields
+// ══════════════════════════════════════════════════════════════════════
+
+export type ForexSignal = "STRONG_BUY" | "BUY" | "NEUTRAL" | "SELL" | "STRONG_SELL" | "NO_DATA";
+
+export interface ForexPair {
+  symbol: string;           // e.g. "EURUSD"
+  name: string;             // e.g. "EUR/USD"
+  price: number;
+  bid: number;
+  ask: number;
+  spread_pips: number;
+  change_1h_pct: number;
+  change_24h_pct: number;
+  high_24h: number;
+  low_24h: number;
+  volume_24h: number;
+  signal: ForexSignal;
+  score: number;
+  confidence: number;
+  atr_pips: number;
+  support_1: number;
+  resistance_1: number;
+  pivot: number;
+  rsi: number;
+  macd_signal: string;
+  votes: { BUY: number; SELL: number; NEUTRAL: number };
+  indicators: Record<string, unknown>;
+}
+
+export interface ForexMarketOverview {
+  eurusd_price: number;
+  eurusd_change_1h: number;
+  gbpusd_price: number;
+  gbpusd_change_1h: number;
+  usdjpy_price: number;
+  usdjpy_change_1h: number;
+  audusd_price: number;
+  audusd_change_1h: number;
+  usdcad_price: number;
+  usdcad_change_1h: number;
+  market_status: "OPEN" | "CLOSED";
+  volatility_index: number;
+  sentiment: string;
+}
+
+export interface ForexSentimentOverview {
+  market_bias: string;
+  volatility: "LOW" | "MEDIUM" | "HIGH" | "EXTREME";
+  economic_events_today: number;
+  economic_events_this_week: number;
+  central_bank_alert: boolean;
+  risk_sentiment: string;  // "RISK_ON" | "RISK_OFF"
+  usd_strength: number;
+  commodity_correlation: string;
+}
+
+export interface ForexNewsItem {
+  headline: string;
+  source: string;
+  url: string;
+  published: string;
+  sentiment: "BULLISH" | "BEARISH" | "NEUTRAL";
+  affected_pairs: string[];
+  event_type: string;  // "ECONOMIC" | "GEOPOLITICAL" | "EARNINGS"
+  impact: "HIGH" | "MEDIUM" | "LOW";
+}
+
+export interface ForexPosition {
+  symbol: string;
+  name: string;
+  entry_price: number;
+  entry_time: string;
+  units: number;
+  capital_deployed: number;
+  stop_loss: number;
+  take_profit: number;
+  trailing_stop: number;
+  confluence_score: number;
+  entry_reasoning: string[];
+  current_price: number;
+  unrealized_pnl: number;
+  unrealized_pnl_pct: number;
+  status: "OPEN" | "CLOSED";
+  atr_pips: number;
+  strategy_key?: string;
+}
+
+export interface ForexPendingSignal {
+  symbol: string;
+  name: string;
+  price: number;
+  confluence_score: number;
+  missing: string[];
+  met_conditions: string[];
+  strategy_key?: string;
+  strength_score: number;
+}
+
+export interface ForexJournalEntry {
+  timestamp: string;
+  symbol: string;
+  action: "ENTER" | "EXIT" | "SKIP";
+  confluence_score?: number;
+  entry_price?: number;
+  exit_price?: number;
+  pnl?: number;
+  pnl_pct?: number;
+  reasoning: string[];
+  hold_duration_minutes?: number;
+  units?: number;
+}
+
+export interface ForexAutoTraderStats {
+  total_trades: number;
+  winning_trades: number;
+  losing_trades: number;
+  win_rate: number;
+  total_pnl: number;
+  total_pnl_pct: number;
+  avg_win: number;
+  avg_loss: number;
+  best_trade: { symbol: string; pnl: number } | null;
+  worst_trade: { symbol: string; pnl: number } | null;
+  profit_factor: number;
+  max_drawdown: number;
+}
+
+export interface ForexAutoTraderIntelligence {
+  news_articles: number;
+  economic_calendar_events: number;
+  market_sentiment: string;
+  news_last_updated: string | null;
+  ai_enabled: boolean;
+  indicators_active: number;
+}
+
+export interface ForexAutoTraderData {
+  enabled: boolean;
+  running: boolean;
+  test_mode: boolean;
+  scan_count: number;
+  last_scan: string | null;
+  positions: ForexPosition[];
+  pending_signals: ForexPendingSignal[];
+  capital: number;
+  cash_available: number;
+  today_pnl: number;
+  total_pnl: number;
+  portfolio_heat: number;
+  stats: ForexAutoTraderStats;
+  risk_status: {
+    can_trade: boolean;
+    reason: string;
+    max_positions?: number;
+    positions?: number;
+    max_leverage?: number;
+    current_leverage?: number;
+  };
+  intelligence?: ForexAutoTraderIntelligence;
+  scan_interval_seconds?: number;
+}
+
+export interface ForexDashboardData {
+  pairs: ForexPair[];
+  overview: ForexMarketOverview;
+  sentiment_overview: ForexSentimentOverview;
+  buy_candidates: ForexPair[];
+  sell_candidates: ForexPair[];
+  top_gainers: ForexPair[];
+  top_losers: ForexPair[];
+  news: ForexNewsItem[];
+  economic_calendar: ForexNewsItem[];
+  timestamp: string;
+}
+
 // Platform selector
-export type Platform = "stocks" | "crypto";
+export type Platform = "stocks" | "crypto" | "forex";
 
 // Navigation
-export type ScreenTab = "dashboard" | "intraday" | "swing" | "positional" | "options" | "portfolio" | "news" | "auto-trader" | "strategy-lab";
+export type ScreenTab = "dashboard" | "intraday" | "swing" | "positional" | "options" | "portfolio" | "news" | "auto-trader-main" | "auto-trader-paper" | "auto-trader" | "strategy-lab";
 export type CryptoScreenTab = "dashboard" | "scanner" | "portfolio" | "auto-trader" | "chart" | "news" | "investors" | "strategy-lab";
 
 export interface DashboardData {

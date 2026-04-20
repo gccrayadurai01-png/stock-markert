@@ -1,16 +1,55 @@
 services:
+  # ── Backend (Python / FastAPI) ──────────────────────────────────────────
   - type: web
     name: trading-brain-backend
     env: python
     region: singapore
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --http h11
     envVars:
       - key: PORT
-        value: 10000
-      - key: ANTHROPIC_API_KEY
-        sync: false          # You will paste this in Render dashboard
+        value: "10000"
       - key: PYTHON_VERSION
-        value: 3.11.0
+        value: "3.11.0"
+      # ── Zerodha (paste your values in Render dashboard → Environment) ──
+      - key: ZERODHA_API_KEY
+        sync: false
+      - key: ZERODHA_API_SECRET
+        sync: false
+      - key: ZERODHA_ACCESS_TOKEN
+        sync: false          # Update this daily via Dashboard → Broker → Login
+      # ── AI ─────────────────────────────────────────────────────────────
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      # ── Trading settings ───────────────────────────────────────────────
+      - key: PAPER_TRADING_CAPITAL
+        value: "100000"
+      - key: REAL_TRADING_CAPITAL
+        value: "32000"
+      - key: MIN_BALANCE_LIMIT
+        value: "5000"
+      - key: STRATEGY_WIN_RATE_THRESHOLD
+        value: "60"
+      - key: MIN_TRADES_FOR_SELECTION
+        value: "10"
+
+  # ── Frontend (Next.js) ─────────────────────────────────────────────────
+  - type: web
+    name: trading-brain-frontend
+    env: node
+    region: singapore
+    plan: free
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: PORT
+        value: "3000"
+      # Set this in Render dashboard to your backend URL:
+      # https://trading-brain-backend.onrender.com
+      - key: NEXT_PUBLIC_API_URL
+        sync: false

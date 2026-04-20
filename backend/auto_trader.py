@@ -37,11 +37,20 @@ from auto_store import (
     log_trade_decision, save_scan_result, save_daily_summary,
     reset_daily_pnl, get_portfolio_stats,
     get_strategy_performance, record_strategy_trade, log_strategy_trade_detail,
+    load_real_config,
 )
 from smc_engine import analyze_smc
 
 logger = logging.getLogger(__name__)
 executor = ThreadPoolExecutor(max_workers=3)
+
+
+# ── Real-broker bridge ──────────────────────────────────────────────────
+# main.py installs a provider that returns a live ZerodhaBroker iff
+# (broker connected) AND (real_trading_enabled). This lets us keep
+# auto_trader free of circular imports with main.
+# Signature: () -> Optional[ZerodhaBroker]
+broker_provider = None  # set by main.py at startup
 
 
 def _get_anthropic_client():
@@ -145,9 +154,16 @@ class AutoTrader:
 
             # 4. Check exits for open positions FIRST (before entries)
             await self._check_exits(all_stocks)
+            # 4b. Independent REAL-TRADING exit engine — reads live broker
+            # positions and squares off on SL / target / time, no coupling to paper.
+            await self._real_check_exits(all_stocks)
 
             # 5. Risk check — can we take new trades?
             risk = self._check_risk_limits()
+
+            # 5b. Snapshot currently-open real positions once per scan (for dedupe).
+            _real_broker_snap = self._real_get_broker()
+            real_open_symbols = self._real_open_symbols(_real_broker_snap) if _real_broker_snap else set()
 
             # 6. Evaluate entries — INDEPENDENT STRATEGY MODE
             # ANY strategy firing = take the trade (no more ALL_REQUIRED)
@@ -157,6 +173,9 @@ class AutoTrader:
             if risk["can_trade"]:
                 for stock in all_stocks:
                     strategy_results = await self._evaluate_all_strategies(stock)
+                    # Cache on the stock dict so the watchlist builder can read
+                    # it without re-running async evaluation.
+                    stock["_strategy_results"] = strategy_results
                     if not strategy_results:
                         continue
 
@@ -216,6 +235,13 @@ class AutoTrader:
                             except Exception as e:
                                 logger.warning(f"AI confirmation error for {stock['symbol']}: {e}")
 
+                        # EXECUTE REAL TRADE (independent) — runs regardless of paper,
+                        # gated by real's own active_strategies / min_confluence / sizing.
+                        try:
+                            self._real_entry(stock, entry_analysis, real_open_symbols)
+                        except Exception as _e:
+                            logger.error(f"🔴💥 real entry error: {_e}", exc_info=True)
+
                         # EXECUTE PAPER TRADE
                         trade = self._execute_entry(stock, entry_analysis)
                         if trade:
@@ -268,6 +294,11 @@ class AutoTrader:
             # 7. Save scan result
             elapsed = round(time.time() - start_time, 1)
             portfolio = get_portfolio()
+
+            # Build REAL-TRADING watchlist: stocks being monitored against
+            # real's rules (active_strategies ∩ fired/near-fire, score ≥ threshold).
+            real_watchlist = self._build_real_watchlist(all_stocks)
+
             save_scan_result({
                 "scan_number": self.scan_count,
                 "stocks_scanned": len(all_stocks),
@@ -284,6 +315,7 @@ class AutoTrader:
             self.last_scan = datetime.now()
             self.last_scan_data = {
                 "pending_signals": pending_signals[:10],
+                "real_watchlist": real_watchlist,
                 "scan_count": self.scan_count,
                 "entries_made": entries_made,
                 "news_sentiment": self._cached_sentiment.get("sentiment", "N/A"),
@@ -1248,6 +1280,223 @@ Respond ONLY with JSON: {{"confirmed": true, "reasoning": "one sentence why"}}""
                 "reasoning": [reason],
             })
             logger.info(f"🤖🚪 FORCE EXIT: {pos['symbol']} @ ₹{current:.0f} — {reason}")
+
+    # ── INDEPENDENT REAL-TRADING ENGINE ────────────────────────────────
+    # Real trading is SYSTEMATIC, evaluated on the same shared scan but
+    # with its own gates, its own capital, its own position book (Zerodha).
+    # It does NOT mirror or depend on paper. Both consume scan output in
+    # parallel. Called from scan_cycle once per tick.
+
+    def _real_get_broker(self):
+        """Return a live, usable Zerodha broker (or None)."""
+        try:
+            br = broker_provider() if callable(broker_provider) else None
+            return br if (br and getattr(br, "connected", False)) else None
+        except Exception:
+            return None
+
+    def _build_real_watchlist(self, all_stocks: list) -> list:
+        """
+        Build a watchlist of stocks being monitored against REAL trading rules.
+        Reads strategy_results cached on each stock during the main scan loop.
+        Filters by real's active_strategies — shows score, distance to fire.
+        """
+        cfg = load_real_config()
+        active_map = cfg.get("active_strategies", {}) or {}
+        active_real = {k for k, v in active_map.items() if v}
+        if not active_real:
+            return []
+        min_conf = float(cfg.get("min_confluence", 60) or 60)
+
+        watchlist = []
+        for stock in all_stocks or []:
+            results = stock.get("_strategy_results") or {}
+            if not results:
+                continue
+            # Only consider strategies the user activated for real trading
+            relevant = {sid: r for sid, r in results.items() if sid in active_real}
+            if not relevant:
+                continue
+            best_id = max(relevant, key=lambda sid: relevant[sid].get("score", 0))
+            best = relevant[best_id]
+            score = float(best.get("score", 0))
+            # Only show stocks with meaningful score (skip noise)
+            if score < max(25, min_conf - 30):
+                continue
+            fires = bool(best.get("fires")) and score >= min_conf
+            watchlist.append({
+                "symbol": str(stock.get("symbol", "")).replace(".NS", "").replace(".BO", ""),
+                "name": stock.get("name", ""),
+                "price": float(stock.get("price", 0) or 0),
+                "strategy_id": best_id,
+                "strategy_name": best.get("name", best_id),
+                "confluence_score": round(score, 1),
+                "threshold": min_conf,
+                "distance_to_fire": round(max(0, min_conf - score), 1),
+                "fires_now": fires,
+                "met_conditions": (best.get("reasons") or [])[:3],
+                "missing": (best.get("missing") or [])[:3],
+            })
+
+        # Sort: firing-now first, then by score desc
+        watchlist.sort(key=lambda w: (not w["fires_now"], -w["confluence_score"]))
+        return watchlist[:15]
+
+    def _real_open_symbols(self, broker) -> set:
+        """Symbols with a non-zero open position on the real broker."""
+        try:
+            pos = broker.get_positions() or {}
+            net = pos.get("net", []) if isinstance(pos, dict) else []
+            return {
+                str(p.get("tradingsymbol", "")).upper()
+                for p in net
+                if int(p.get("quantity", 0)) != 0
+            }
+        except Exception as e:
+            logger.warning(f"🔴 real positions fetch failed: {e}")
+            return set()
+
+    async def _real_check_exits(self, all_stocks: list):
+        """
+        Independent exit engine for REAL positions.
+        Reads live broker positions, applies SL / target / time-based rules,
+        squares off on the broker directly. Does NOT touch the paper book.
+        """
+        broker = self._real_get_broker()
+        if not broker:
+            return
+        cfg = load_real_config()
+        square_off_time = cfg.get("auto_square_off_time", "15:15")
+        try:
+            h, m = (int(x) for x in square_off_time.split(":"))
+        except Exception:
+            h, m = 15, 15
+
+        price_map = {
+            str(s.get("symbol", "")).replace(".NS", "").replace(".BO", "").upper(): s
+            for s in (all_stocks or [])
+        }
+
+        try:
+            positions = (broker.get_positions() or {}).get("net", [])
+        except Exception as e:
+            logger.warning(f"🔴 exits: positions fetch failed: {e}")
+            return
+
+        now = datetime.now()
+        time_exit = (now.hour > h) or (now.hour == h and now.minute >= m)
+
+        for p in positions:
+            qty = int(p.get("quantity", 0) or 0)
+            if qty <= 0:
+                continue
+            ts = str(p.get("tradingsymbol", "")).upper()
+            entry = float(p.get("average_price", 0) or 0)
+            last = float(p.get("last_price", 0) or 0)
+            scan = price_map.get(ts) or {}
+            current = float(scan.get("price", last) or last)
+            if current <= 0 or entry <= 0:
+                continue
+
+            # Pull SL / T1 from the scan if available, else derive simple defaults.
+            stop_loss = float(scan.get("stop_loss", entry * 0.97) or entry * 0.97)
+            target_1  = float(scan.get("target_1",  entry * 1.03) or entry * 1.03)
+
+            exit_reason = None
+            if current <= stop_loss:
+                exit_reason = f"Stop-loss hit @ ₹{current:.2f} (SL ₹{stop_loss:.2f})"
+            elif current >= target_1:
+                exit_reason = f"Target-1 hit @ ₹{current:.2f} (T1 ₹{target_1:.2f})"
+            elif time_exit:
+                exit_reason = f"Auto square-off ({square_off_time} IST)"
+            elif current < entry * 0.97:
+                exit_reason = f"Circuit breaker: position down {(current/entry-1)*100:.1f}%"
+
+            if not exit_reason:
+                continue
+
+            order = broker.place_order(
+                symbol=ts, quantity=qty, price=round(current, 2),
+                transaction_type="SELL", order_type="MARKET",
+            )
+            if order.get("status") == "success":
+                logger.info(
+                    f"🔴🚪 REAL EXIT: {ts} qty={qty} @ MKT · "
+                    f"order_id={order.get('order_id')} · {exit_reason}"
+                )
+            else:
+                logger.error(f"🔴❌ REAL EXIT FAILED: {ts} — {order.get('message')}")
+
+    def _real_entry(self, stock: dict, analysis: dict, already_open: set):
+        """
+        Systematic REAL entry. Independent of paper. Fires iff:
+          - broker connected
+          - real_trading_enabled (enforced in broker_provider)
+          - at least one fired strategy is in real's active_strategies
+          - confluence ≥ real's min_confluence
+          - not already holding this symbol on the real account
+          - allocated real capital supports at least 1 share after risk/cap sizing
+          - trade limits not exceeded (max_open_positions, max_trades_per_day)
+        """
+        broker = self._real_get_broker()
+        if not broker:
+            return
+
+        cfg = load_real_config()
+        active_map = cfg.get("active_strategies", {}) or {}
+        active_real = {k for k, v in active_map.items() if v}
+        fired = set(analysis.get("strategies_confirmed", []))
+        matched = active_real & fired
+        if not matched:
+            return
+
+        min_conf = float(cfg.get("min_confluence", 60) or 60)
+        if float(analysis.get("confluence", 0)) < min_conf:
+            return
+
+        tradingsymbol = str(stock["symbol"]).replace(".NS", "").replace(".BO", "").upper()
+        if tradingsymbol in already_open:
+            return  # dedupe: already holding on real account
+
+        # Enforce max_open_positions on the real book.
+        if len(already_open) >= int(cfg.get("max_open_positions", 3) or 3):
+            logger.info(f"🔴⏸ real: max_open_positions reached, skipping {tradingsymbol}")
+            return
+
+        price = float(stock.get("price", 0) or 0)
+        if price <= 0:
+            return
+        stop_loss = float(stock.get("stop_loss", price * 0.97) or price * 0.97)
+
+        # Real sizing: risk-based, capped by max_position_size_pct of allocated capital.
+        capitals = cfg.get("capitals", {}) or {}
+        real_capital = sum(float(capitals.get(s, 0) or 0) for s in matched)
+        risk_pct     = float(cfg.get("risk_per_trade_pct", 1) or 1) / 100
+        max_pos_pct  = float(cfg.get("max_position_size_pct", 10) or 10) / 100
+        risk_per_share = max(price - stop_loss, price * 0.01)
+        shares_risk = int((real_capital * risk_pct) // risk_per_share) if risk_per_share > 0 else 0
+        shares_cap  = int((real_capital * max_pos_pct) // price) if price > 0 else 0
+        shares = max(0, min(shares_risk, shares_cap))
+        if shares <= 0:
+            logger.warning(
+                f"🔴⚠️ real skip {tradingsymbol}: allocated ₹{real_capital:.0f} "
+                f"insufficient (risk ₹{risk_per_share:.2f}/share @ ₹{price:.2f})"
+            )
+            return
+
+        order = broker.place_order(
+            symbol=tradingsymbol, quantity=shares, price=round(price, 2),
+            transaction_type="BUY", order_type="MARKET",
+        )
+        if order.get("status") == "success":
+            already_open.add(tradingsymbol)  # update dedupe set for remaining iterations
+            logger.info(
+                f"🔴💰 REAL ENTRY: {tradingsymbol} qty={shares} @ MKT · "
+                f"order_id={order.get('order_id')} · strategies={sorted(matched)} · "
+                f"score={analysis.get('confluence')}"
+            )
+        else:
+            logger.error(f"🔴❌ REAL ENTRY FAILED: {tradingsymbol} — {order.get('message')}")
 
     # ── RISK MANAGEMENT ────────────────────────────────────────────────
 

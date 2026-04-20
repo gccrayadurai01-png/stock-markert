@@ -17,6 +17,7 @@ SCAN_LOG_FILE = DATA_DIR / "scan_log.json"
 CONFIG_FILE = DATA_DIR / "config.json"
 DAILY_FILE = DATA_DIR / "daily_summary.json"
 STRATEGY_PERF_FILE = DATA_DIR / "strategy_performance.json"
+REAL_CONFIG_FILE = DATA_DIR / "real_trading_config.json"
 
 
 def _read(path: Path) -> Union[dict, list]:
@@ -39,7 +40,7 @@ DEFAULT_CONFIG = {
     "max_portfolio_heat": 8.0,
     "min_confluence": 55,
     "trailing_sl_atr_multiplier": 1.5,
-    "scan_interval_seconds": 150,
+    "scan_interval_seconds": 180,  # 3 min — shared between paper + real trading
     "test_mode": True,
     "test_mode_start": None,
     "close_positions_time": "15:15",
@@ -67,6 +68,49 @@ def save_auto_config(config: dict):
     existing = load_auto_config()
     existing.update(config)
     _write(CONFIG_FILE, existing)
+
+
+# ── Real Trading Config ────────────────────────────────────────────────
+
+DEFAULT_REAL_CONFIG = {
+    "active_strategies": {"A": False, "B": False, "C": False, "D": False, "E": False},
+    "capitals": {"A": 1000, "B": 1000, "C": 1000, "D": 1000, "E": 1000},
+    "strategy_mode": "ANY_TRIGGERS",
+    "enabled": False,
+    # Risk / execution configuration (editable from Real Trading → Settings)
+    "max_trades_per_day": 5,
+    "max_open_positions": 3,
+    "max_position_size_pct": 10,       # % of account balance
+    "emergency_stop_balance": 2000,    # halt trading below this ₹
+    "daily_loss_limit_pct": 5,         # % of account balance
+    "risk_per_trade_pct": 1,           # % of capital risked per trade
+    "min_paper_win_rate": 60,          # gate: only deploy strategies above this
+    "min_paper_trades": 10,            # gate: only deploy strategies above this
+    "auto_square_off_time": "15:15",   # HH:MM IST intraday exit
+    "allow_premarket": False,
+}
+
+
+def load_real_config() -> dict:
+    cfg = _read(REAL_CONFIG_FILE)
+    if not cfg:
+        cfg = DEFAULT_REAL_CONFIG.copy()
+        _write(REAL_CONFIG_FILE, cfg)
+    return {**DEFAULT_REAL_CONFIG, **cfg}
+
+
+def save_real_config(config: dict) -> dict:
+    existing = load_real_config()
+    # Merge nested dicts (capitals, active_strategies) instead of replacing
+    if "capitals" in config and isinstance(config["capitals"], dict):
+        existing["capitals"] = {**existing.get("capitals", {}), **config["capitals"]}
+        config = {k: v for k, v in config.items() if k != "capitals"}
+    if "active_strategies" in config and isinstance(config["active_strategies"], dict):
+        existing["active_strategies"] = {**existing.get("active_strategies", {}), **config["active_strategies"]}
+        config = {k: v for k, v in config.items() if k != "active_strategies"}
+    existing.update(config)
+    _write(REAL_CONFIG_FILE, existing)
+    return existing
 
 
 # ── Portfolio ──────────────────────────────────────────────────────────

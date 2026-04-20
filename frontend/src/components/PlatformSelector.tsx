@@ -1,6 +1,6 @@
 "use client";
 
-import { TrendingUp, Bitcoin, ArrowRight, Activity, Clock, Globe, Zap } from "lucide-react";
+import { TrendingUp, Bitcoin, ArrowRight, Activity, Clock, Globe, Zap, DollarSign } from "lucide-react";
 import type { Platform } from "@/lib/types";
 
 interface PlatformSelectorProps {
@@ -37,7 +37,7 @@ export default function PlatformSelector({ userEmail, onSelect, onLogout }: Plat
             </p>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
             {/* Stocks card */}
             <button
               onClick={() => onSelect("stocks")}
@@ -116,6 +116,47 @@ export default function PlatformSelector({ userEmail, onSelect, onLogout }: Plat
                 <div className="pt-3 border-t border-slate-700/60 flex items-center justify-between">
                   <span className="text-xs text-gray-500">Capital: $ USDT</span>
                   <span className="text-xs font-bold text-orange-400 group-hover:text-orange-300">Enter →</span>
+                </div>
+              </div>
+            </button>
+
+            {/* Forex card */}
+            <button
+              onClick={() => onSelect("forex")}
+              className="group relative bg-slate-800/60 hover:bg-slate-800 border-2 border-slate-700 hover:border-blue-500/60 rounded-2xl p-6 md:p-8 text-left transition-all overflow-hidden"
+            >
+              <div className="absolute inset-0 bg-gradient-to-br from-blue-500/10 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none" />
+              <div className="relative space-y-5">
+                <div className="flex items-center justify-between">
+                  <div className="p-3 bg-blue-500/10 border border-blue-500/30 rounded-xl">
+                    <DollarSign className="w-7 h-7 text-blue-400" />
+                  </div>
+                  <ArrowRight className="w-5 h-5 text-gray-500 group-hover:text-blue-400 group-hover:translate-x-1 transition" />
+                </div>
+
+                <div>
+                  <h2 className="text-2xl font-black text-white mb-1">Forex</h2>
+                  <p className="text-sm text-gray-400">28 major pairs — 24/5 global markets with smart entry signals.</p>
+                </div>
+
+                <ul className="space-y-2 text-xs text-gray-300">
+                  <li className="flex items-center gap-2">
+                    <Activity className="w-3.5 h-3.5 text-blue-400" />
+                    12 indicators · SMC/ICT · Level-based entries
+                  </li>
+                  <li className="flex items-center gap-2">
+                    <Globe className="w-3.5 h-3.5 text-blue-400" />
+                    24/5 trading · Economic calendar · USD strength
+                  </li>
+                  <li className="flex items-center gap-2">
+                    <Zap className="w-3.5 h-3.5 text-blue-400" />
+                    Risk-reward focused · Low spread pairs · Auto-trader ready
+                  </li>
+                </ul>
+
+                <div className="pt-3 border-t border-slate-700/60 flex items-center justify-between">
+                  <span className="text-xs text-gray-500">Capital: $ USD</span>
+                  <span className="text-xs font-bold text-blue-400 group-hover:text-blue-300">Enter →</span>
                 </div>
               </div>
             </button>

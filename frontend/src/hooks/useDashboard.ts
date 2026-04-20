@@ -4,7 +4,10 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import type { DashboardData } from "@/lib/types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-const WS_URL = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000/ws";
+const WS_URL = process.env.NEXT_PUBLIC_WS_URL ||
+  (process.env.NEXT_PUBLIC_API_URL
+    ? process.env.NEXT_PUBLIC_API_URL.replace(/^https/, "wss").replace(/^http/, "ws") + "/ws"
+    : "ws://localhost:8000/ws");
 
 export function useDashboard() {
   const [data, setData] = useState<DashboardData | null>(null);

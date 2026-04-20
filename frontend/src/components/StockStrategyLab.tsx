@@ -130,6 +130,9 @@ export default function StockStrategyLab() {
   const [selected, setSelected] = useState<StrategyId>("C");
   const [perf, setPerf] = useState<StrategyPerformanceMap>({});
   const [view, setView] = useState<"ranking" | "guide">("ranking");
+  const [activeReal, setActiveReal] = useState<Record<string, boolean>>({});
+  const [deployingId, setDeployingId] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
 
   const fetchPerf = useCallback(async () => {
     try {
@@ -138,7 +141,43 @@ export default function StockStrategyLab() {
     } catch { /* ignore */ }
   }, []);
 
-  useEffect(() => { fetchPerf(); }, [fetchPerf]);
+  const fetchRealConfig = useCallback(async () => {
+    try {
+      const r = await fetch(`${API}/api/real-trading/config`);
+      if (r.ok) {
+        const cfg = await r.json();
+        setActiveReal(cfg?.active_strategies ?? {});
+      }
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => { fetchPerf(); fetchRealConfig(); }, [fetchPerf, fetchRealConfig]);
+
+  const toggleRealStrategy = async (id: StrategyId, enable: boolean) => {
+    setDeployingId(id);
+    try {
+      const r = await fetch(`${API}/api/real-trading/config`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ active_strategies: { [id]: enable } }),
+      });
+      if (r.ok) {
+        setActiveReal((p) => ({ ...p, [id]: enable }));
+        setToast(enable
+          ? `✓ Strategy ${id} added to Real Trading`
+          : `Strategy ${id} removed from Real Trading`);
+        setTimeout(() => setToast(null), 2500);
+      } else {
+        setToast("Failed to update — try again");
+        setTimeout(() => setToast(null), 2500);
+      }
+    } catch {
+      setToast("Network error — try again");
+      setTimeout(() => setToast(null), 2500);
+    } finally {
+      setDeployingId(null);
+    }
+  };
 
   const guide = STRATEGY_GUIDE[selected];
   const livePerfSelected = perf[selected];
@@ -151,6 +190,12 @@ export default function StockStrategyLab() {
           Which strategy works, why it works, and what to expect in real trading.
         </p>
       </div>
+
+      {toast && (
+        <div className="fixed top-4 right-4 z-50 bg-card border border-accent/40 text-foreground text-xs font-semibold px-4 py-2.5 rounded-lg shadow-lg">
+          {toast}
+        </div>
+      )}
 
       <div className="flex gap-2">
         {(["ranking", "guide"] as const).map((v) => (
@@ -218,7 +263,20 @@ export default function StockStrategyLab() {
                           )}
                         </div>
                       </div>
-                      <div className="text-[10px] text-muted shrink-0 hidden sm:block">Tap to deep-dive →</div>
+                      <div className="shrink-0 flex flex-col gap-1 items-end">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); toggleRealStrategy(id, !activeReal[id]); }}
+                          disabled={deployingId === id}
+                          className={`text-[10px] font-black px-2.5 py-1.5 rounded-lg border transition whitespace-nowrap ${
+                            activeReal[id]
+                              ? "bg-green/15 text-green border-green/40 hover:bg-green/20"
+                              : "bg-accent/10 text-accent border-accent/40 hover:bg-accent/20"
+                          } ${deployingId === id ? "opacity-50 cursor-wait" : ""}`}
+                        >
+                          {deployingId === id ? "..." : activeReal[id] ? "✓ IN REAL" : "+ ADD TO REAL"}
+                        </button>
+                        <div className="text-[10px] text-muted hidden sm:block">Tap row to deep-dive →</div>
+                      </div>
                     </div>
                   </div>
                 );
@@ -316,6 +374,17 @@ export default function StockStrategyLab() {
                   Real Trading: {guide.real_trading_verdict.replace("_", " ")}
                 </span>
                 <span className={`text-xs font-bold ${RISK_STYLE[guide.risk_level]}`}>{guide.risk_level} RISK</span>
+                <button
+                  onClick={() => toggleRealStrategy(selected, !activeReal[selected])}
+                  disabled={deployingId === selected}
+                  className={`text-xs font-black px-3 py-1.5 rounded-lg border transition ${
+                    activeReal[selected]
+                      ? "bg-green/15 text-green border-green/40 hover:bg-green/25"
+                      : "bg-accent text-white border-accent hover:opacity-90"
+                  } ${deployingId === selected ? "opacity-50 cursor-wait" : ""}`}
+                >
+                  {deployingId === selected ? "Saving..." : activeReal[selected] ? "✓ Active in Real Trading" : "+ Add to Real Trading"}
+                </button>
               </div>
             </div>
 

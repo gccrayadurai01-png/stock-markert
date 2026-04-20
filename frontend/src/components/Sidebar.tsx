@@ -20,7 +20,9 @@ const TABS: { id: ScreenTab; label: string; icon: string }[] = [
   { id: "options",     label: "Options",     icon: "🎯" },
   { id: "portfolio",   label: "Portfolio",   icon: "💰" },
   { id: "news",        label: "News",        icon: "📰" },
-  { id: "auto-trader", label: "Auto Trader", icon: "🤖" },
+  { id: "auto-trader-main", label: "Auto Trader", icon: "🤖" },
+  { id: "auto-trader-paper", label: "Auto Trader (Paper)", icon: "📄" },
+  { id: "auto-trader", label: "Auto Trader (Real)", icon: "🔴" },
   { id: "strategy-lab", label: "Strategy Lab", icon: "🔬" },
 ];
 

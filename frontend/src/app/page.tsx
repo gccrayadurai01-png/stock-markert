@@ -18,8 +18,11 @@ import PortfolioDashboard from "@/components/PortfolioDashboard";
 import NewsAlerts from "@/components/NewsAlerts";
 import LoginPage from "@/components/LoginPage";
 import AutoTraderDashboard from "@/components/AutoTraderDashboard";
+import PaperTradingDashboard from "@/components/PaperTradingDashboard";
+import RealTradingDashboard from "@/components/RealTradingDashboard";
 import PlatformSelector from "@/components/PlatformSelector";
 import CryptoDashboardScreen from "@/components/CryptoDashboardScreen";
+import ForexDashboardScreen from "@/components/ForexDashboardScreen";
 import StockStrategyLab from "@/components/StockStrategyLab";
 import { LogOut } from "lucide-react";
 
@@ -39,6 +42,15 @@ export default function Dashboard() {
     }
     if (savedPlatform === "stocks" || savedPlatform === "crypto") {
       setPlatform(savedPlatform);
+    }
+    // Honor ?tab=... deep link (used by Kite OAuth callback)
+    if (typeof window !== "undefined") {
+      const qs = new URLSearchParams(window.location.search);
+      const t = qs.get("tab") as ScreenTab | null;
+      if (t) {
+        setActiveTab(t);
+        window.history.replaceState({}, "", window.location.pathname);
+      }
     }
   }, []);
 
@@ -91,6 +103,16 @@ export default function Dashboard() {
   if (platform === "crypto") {
     return (
       <CryptoDashboardScreen
+        onSwitchPlatform={handleSwitchPlatform}
+        onLogout={handleLogout}
+      />
+    );
+  }
+
+  // ── Forex platform ──
+  if (platform === "forex") {
+    return (
+      <ForexDashboardScreen
         onSwitchPlatform={handleSwitchPlatform}
         onLogout={handleLogout}
       />
@@ -226,7 +248,16 @@ export default function Dashboard() {
             />
           )}
 
-          {activeTab === "auto-trader" && <AutoTraderDashboard />}
+          {activeTab === "auto-trader-main" && <AutoTraderDashboard initialData={data} />}
+
+          {activeTab === "auto-trader-paper" && <AutoTraderDashboard initialData={data} />}
+
+          {activeTab === "auto-trader" && (
+            <RealTradingDashboard
+              initialData={data}
+              onOpenStrategyLab={() => setActiveTab("strategy-lab")}
+            />
+          )}
 
           {activeTab === "strategy-lab" && <StockStrategyLab />}
 

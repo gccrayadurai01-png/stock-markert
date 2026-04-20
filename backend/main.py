@@ -7,13 +7,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from datetime import datetime
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import List, Optional
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from dotenv import load_dotenv
 
 from market_engine import (
@@ -35,6 +38,7 @@ from chart_engine import fetch_chart_data, fetch_intraday_chart, fetch_swing_cha
 from auto_trader import AutoTrader
 from auto_store import (
     load_auto_config, save_auto_config,
+    load_real_config, save_real_config,
     get_portfolio as get_auto_portfolio, get_open_positions as get_auto_positions,
     get_trade_journal, get_pending_signals, get_scan_history,
     get_portfolio_stats as get_auto_stats, get_daily_summaries,
@@ -60,6 +64,8 @@ from crypto_store import (
 )
 
 import manual_trade_store
+from forex_engine import get_forex_dashboard
+from zerodha_broker import ZerodhaBroker, PaperTradingBroker
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -72,6 +78,19 @@ user_config: dict = load_config()
 executor = ThreadPoolExecutor(max_workers=4)
 auto_trader: Optional[AutoTrader] = None
 crypto_trader: Optional[CryptoAutoTrader] = None
+broker: Optional[ZerodhaBroker] = None
+# Persisted flag — restored from real_trading_config.json on startup so LIVE mode
+# survives backend restarts (user explicitly enabled it once, respect that).
+real_trading_enabled: bool = bool(load_real_config().get("enabled", False))
+
+# ── Trading Settings (Editable) ────────────────────────────────────────
+trading_settings: dict = {
+    "paper_trading_capital": 10000,
+    "real_trading_capital": 5000,
+    "min_balance_limit": 2000,
+    "strategy_win_rate_threshold": 60,
+    "min_trades_for_selection": 10,
+}
 
 
 # ── Core Analysis Loop ─────────────────────────────────────────────────
@@ -286,16 +305,139 @@ async def _auto_trader_scheduler():
             save_auto_config(cfg)
 
 
+_TOKEN_STORE = Path(__file__).parent / "data" / "auto" / "zerodha_token.json"
+
+
+def _load_stored_token() -> str:
+    """Read the last successfully exchanged access token from the JSON store."""
+    try:
+        if _TOKEN_STORE.exists():
+            data = json.loads(_TOKEN_STORE.read_text())
+            return data.get("access_token", "")
+    except Exception:
+        pass
+    return ""
+
+
+def _save_stored_token(token: str):
+    """Persist the access token so it survives process restarts on Render/cloud."""
+    try:
+        _TOKEN_STORE.parent.mkdir(parents=True, exist_ok=True)
+        _TOKEN_STORE.write_text(json.dumps({
+            "access_token": token,
+            "saved_at": datetime.now().isoformat(),
+        }, indent=2))
+    except Exception as e:
+        logger.warning(f"⚠️ Could not save token to store: {e}")
+
+
+def _try_connect_broker() -> bool:
+    """
+    Attempt to connect ZerodhaBroker using credentials from .env / JSON token store.
+    Priority: os.environ → JSON token store → .env file.
+    Returns True if connected and token is valid.
+    Sets the global `broker` variable on success.
+    Safe to call multiple times — each call creates a fresh instance.
+    """
+    global broker
+    try:
+        api_key    = os.getenv("ZERODHA_API_KEY", "")
+        api_secret = os.getenv("ZERODHA_API_SECRET", "")
+        # Token priority: env var → JSON store (survives restarts on cloud)
+        token = os.getenv("ZERODHA_ACCESS_TOKEN", "")
+        if not token:
+            token = _load_stored_token()
+            if token:
+                os.environ["ZERODHA_ACCESS_TOKEN"] = token  # inject so ZerodhaBroker picks it up
+                logger.info("🔑 Using stored token from JSON fallback")
+        if not all([api_key, api_secret, token]):
+            logger.info("🔑 Zerodha creds not set — skipping auto-connect")
+            return False
+
+        b = ZerodhaBroker()
+        if not b.connected:
+            logger.warning("🔴 Zerodha handshake failed on startup — token may be invalid")
+            return False
+
+        # Verify token actually works (tokens expire daily ~6 AM IST)
+        balance = b.get_balance()
+        if balance.get("status") != "success":
+            msg = balance.get("message", "unknown")
+            logger.warning(
+                f"🔴 Zerodha connected but token invalid: {msg}\n"
+                "   ➜ Regenerate KITE_ACCESS_TOKEN via Kite login flow then restart."
+            )
+            return False
+
+        broker = b
+        logger.info(
+            f"✅ Broker auto-connected on startup — "
+            f"balance ₹{balance.get('total_balance', 0):,.2f}"
+        )
+        return True
+    except Exception as e:
+        logger.error(f"❌ Broker auto-connect error: {e}")
+        return False
+
+
+async def _broker_reconnect_loop():
+    """
+    Background task: every 60 s, if real trading is enabled but broker is
+    disconnected, try to reconnect automatically.
+
+    This handles two failure modes:
+      1. Server restart  — broker global resets to None but token is still valid.
+      2. Token expiry    — daily at ~6 AM IST; logs a clear warning so user knows
+                           to regenerate via the UI (can't auto-fix without a new
+                           Zerodha login-flow token).
+    """
+    global broker
+    await asyncio.sleep(30)  # brief startup grace period
+    while True:
+        try:
+            if real_trading_enabled and (not broker or not broker.connected):
+                logger.info("🔄 Broker reconnect loop: real trading enabled but broker offline — retrying…")
+                connected = await asyncio.get_event_loop().run_in_executor(None, _try_connect_broker)
+                if not connected:
+                    logger.warning(
+                        "⚠️  Broker reconnect failed. If token expired, go to Dashboard → "
+                        "Broker → Login with Zerodha to get a fresh access token."
+                    )
+        except Exception as e:
+            logger.error(f"❌ Broker reconnect loop error: {e}")
+        await asyncio.sleep(60)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global auto_trader
-    asyncio.create_task(run_analysis())
+    # Install real-broker hook for the systematic real-trading engine in auto_trader.
+    # Returns the live broker ONLY when (broker connected) AND (real_trading_enabled).
+    # This gate is the single source of truth — the engine never opens real orders
+    # unless this returns a connected broker.
+    import auto_trader as _at
+    _at.broker_provider = lambda: (broker if (broker and broker.connected and real_trading_enabled) else None)
+
+    # ── Auto-connect broker on startup ────────────────────────────────────
+    # If real_trading_enabled was persisted (user had it ON before restart),
+    # immediately try to reconnect using the stored .env token.
+    if real_trading_enabled:
+        logger.info("🔴 Real trading was enabled — attempting broker auto-connect on startup…")
+        await asyncio.get_event_loop().run_in_executor(None, _try_connect_broker)
+    else:
+        logger.info("🟢 Real trading is OFF — skipping broker auto-connect")
+
+    # Don't run analysis on startup — let the scheduler handle it
+    # asyncio.create_task(run_analysis())
 
     # Start 10-min refresh loop (only active during market hours)
     asyncio.create_task(_market_hours_refresh_loop())
 
     # Start auto trader scheduler (auto-start 9:15 AM, auto-stop 3:30 PM)
     asyncio.create_task(_auto_trader_scheduler())
+
+    # Keep broker alive — reconnects automatically if dropped
+    asyncio.create_task(_broker_reconnect_loop())
 
     # The scheduler handles starting/stopping — it checks immediately on first run.
     # Do NOT start auto_trader here to avoid the double-start race condition.
@@ -772,6 +914,142 @@ def update_strategy_config(body: dict):
     if auto_trader:
         auto_trader.config = load_auto_config()
     return {"status": "saved", "config": load_auto_config()}
+
+
+# ── Real Trading Config ────────────────────────────────────────────────
+
+@app.get("/api/real-trading/config")
+def get_real_trading_config():
+    """Get real-trading specific config: active_strategies per id + capitals."""
+    return load_real_config()
+
+
+@app.post("/api/real-trading/config")
+def update_real_trading_config(body: dict):
+    """
+    Update real-trading config.
+    Accepts strategy config AND risk/execution settings from the Settings modal.
+    """
+    allowed = {
+        # Strategy allocation
+        "active_strategies", "capitals", "strategy_mode", "enabled",
+        # Trade limits
+        "max_trades_per_day", "max_open_positions",
+        # Risk controls
+        "max_position_size_pct", "emergency_stop_balance",
+        "daily_loss_limit_pct", "risk_per_trade_pct",
+        # Paper → Live gate
+        "min_paper_win_rate", "min_paper_trades",
+        # Execution
+        "auto_square_off_time", "allow_premarket",
+    }
+    filtered = {k: v for k, v in body.items() if k in allowed}
+    # Coerce numeric strings (HTML number inputs sometimes post as strings) to proper types
+    int_keys  = {"max_trades_per_day", "max_open_positions", "emergency_stop_balance", "min_paper_trades"}
+    num_keys  = {"max_position_size_pct", "daily_loss_limit_pct", "risk_per_trade_pct", "min_paper_win_rate"}
+    for k in list(filtered.keys()):
+        try:
+            if k in int_keys:  filtered[k] = int(float(filtered[k]))
+            elif k in num_keys: filtered[k] = float(filtered[k])
+            elif k == "allow_premarket": filtered[k] = bool(filtered[k])
+        except (TypeError, ValueError):
+            pass
+    new_cfg = save_real_config(filtered)
+    logger.info(f"✅ Real trading config saved: { {k: filtered[k] for k in filtered if k not in ('capitals','active_strategies')} }")
+    return {"status": "saved", "config": new_cfg}
+
+
+@app.get("/api/real-trading/status")
+def get_real_trading_status():
+    """Return real-trading positions + P&L from broker only (no paper data)."""
+    global broker, real_trading_enabled
+    cfg = load_real_config()
+
+    # Shared scan info — paper & real both consume the SAME scan cycle (every ~180s).
+    # This surfaces it so the Real Trading UI can show the scan is running.
+    scan_info = {
+        "scan_count": 0,
+        "last_scan": None,
+        "next_scan_eta_seconds": None,
+        "scan_interval_seconds": 180,
+        "scan_running": False,
+        "pending_signals": [],
+        "real_watchlist": [],
+    }
+    if auto_trader:
+        try:
+            interval = int(auto_trader.config.get("scan_interval_seconds", 180))
+            last = auto_trader.last_scan
+            eta = None
+            if last is not None:
+                elapsed = (datetime.now() - last).total_seconds()
+                eta = max(0, int(interval - elapsed))
+            lsd = auto_trader.last_scan_data or {}
+            scan_info.update({
+                "scan_count": auto_trader.scan_count,
+                "last_scan": last.isoformat() if last else None,
+                "next_scan_eta_seconds": eta,
+                "scan_interval_seconds": interval,
+                "scan_running": auto_trader.running,
+                "pending_signals": lsd.get("pending_signals", []),
+                "real_watchlist": lsd.get("real_watchlist", []),
+            })
+        except Exception:
+            pass
+
+    base = {
+        "config": cfg,
+        "real_trading_enabled": real_trading_enabled,
+        "connected": False,
+        "balance": 0,
+        "positions": [],
+        "today_pnl": 0,
+        "total_pnl": 0,
+        "stats": {"total_trades": 0, "win_rate": 0, "avg_win": 0, "avg_loss": 0, "total_pnl": 0},
+        "scan": scan_info,
+    }
+
+    if not broker or not broker.connected:
+        return base
+
+    try:
+        balance = broker.get_balance()
+        # Detect token-expiry / auth failure (Kite handshake OK but margins() fails)
+        if balance.get("status") != "success":
+            base["auth_error"] = balance.get("message", "Broker auth failed")
+            base["connected"] = False
+            return base
+        positions_raw = broker.get_positions() or {}
+        net_positions = positions_raw.get("net", []) if isinstance(positions_raw, dict) else []
+
+        today_pnl = 0.0
+        live_positions = []
+        for p in net_positions:
+            qty = p.get("quantity", 0)
+            if qty == 0:
+                continue
+            pnl = float(p.get("pnl", 0))
+            today_pnl += pnl
+            live_positions.append({
+                "symbol": p.get("tradingsymbol", ""),
+                "quantity": qty,
+                "entry_price": float(p.get("average_price", 0)),
+                "current_price": float(p.get("last_price", 0)),
+                "unrealized_pnl": pnl,
+                "strategy": p.get("product", "—"),
+            })
+
+        base.update({
+            "connected": True,
+            "balance": balance.get("available_cash", 0),
+            "total_balance": balance.get("total_balance", 0),
+            "positions": live_positions,
+            "today_pnl": today_pnl,
+        })
+    except Exception as e:
+        logger.error(f"Real trading status fetch failed: {e}")
+
+    return base
 
 
 @app.get("/api/eodhd/news")
@@ -1287,6 +1565,392 @@ def crypto_journal_by_date(last_n: int = 200):
             "entries": entries,
         })
     return result
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# FOREX TRADING ROUTES — 28 forex pairs, SMC/ICT analysis, economic calendar
+# ═════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/forex/dashboard")
+def forex_dashboard():
+    """Get complete forex trading dashboard with all pairs, news, economic calendar."""
+    return get_forex_dashboard()
+
+
+@app.get("/api/forex/pairs")
+def forex_pairs(limit: int = 28):
+    """Get all forex pairs with technical analysis."""
+    data = get_forex_dashboard()
+    return data["pairs"][:limit]
+
+
+@app.get("/api/forex/overview")
+def forex_market_overview():
+    """Get major forex pair overview + market sentiment."""
+    data = get_forex_dashboard()
+    return {
+        "overview": data["overview"],
+        "sentiment": data["sentiment_overview"],
+    }
+
+
+@app.get("/api/forex/buy-candidates")
+def forex_buy_candidates():
+    """Get pairs with BUY signals."""
+    data = get_forex_dashboard()
+    return data["buy_candidates"]
+
+
+@app.get("/api/forex/sell-candidates")
+def forex_sell_candidates():
+    """Get pairs with SELL signals."""
+    data = get_forex_dashboard()
+    return data["sell_candidates"]
+
+
+@app.get("/api/forex/economic-calendar")
+def forex_economic_calendar():
+    """Get upcoming economic events that affect forex."""
+    data = get_forex_dashboard()
+    return data["economic_calendar"]
+
+
+@app.get("/api/forex/news")
+def forex_news():
+    """Get forex-related news and sentiment."""
+    data = get_forex_dashboard()
+    return {
+        "news": data["news"],
+        "timestamp": data["timestamp"],
+    }
+
+
+# ── Real Trading / Zerodha Broker ──────────────────────────────────────
+@app.get("/api/broker/test-connection")
+def test_zerodha_connection():
+    """Test Zerodha broker connection. Verifies both handshake AND session token validity."""
+    global broker
+    try:
+        broker = ZerodhaBroker()
+        if not broker.connected:
+            return {
+                "status": "error",
+                "message": "❌ Zerodha connection failed — check KITE_API_KEY in .env",
+                "connected": False,
+            }
+        # Handshake succeeded; now verify the access_token actually works.
+        balance = broker.get_balance()
+        if balance.get("status") != "success":
+            msg = balance.get("message", "")
+            if "access_token" in msg.lower() or "api_key" in msg.lower():
+                hint = "Access token expired (Zerodha tokens reset daily ~6:00 AM IST). Regenerate KITE_ACCESS_TOKEN via the Kite login flow."
+            else:
+                hint = msg or "Broker auth failed"
+            return {
+                "status": "auth_error",
+                "message": f"❌ {hint}",
+                "connected": False,
+                "reason": msg,
+            }
+        return {
+            "status": "success",
+            "message": "✅ Connected to Zerodha Kite API",
+            "connected": True,
+            "balance": balance.get("total_balance", 0),
+            "available_cash": balance.get("available_cash", 0),
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"❌ Error: {str(e)}",
+            "connected": False,
+        }
+
+
+@app.get("/api/broker/kite-login-url")
+def get_kite_login_url():
+    """Return the Kite Connect login URL for the UI to open in a new tab."""
+    api_key = os.getenv("ZERODHA_API_KEY")
+    if not api_key:
+        return {"status": "error", "message": "ZERODHA_API_KEY not set in .env"}
+    return {
+        "status": "success",
+        "url": f"https://kite.zerodha.com/connect/login?api_key={api_key}&v=3",
+        "api_key": api_key,
+    }
+
+
+class ExchangeTokenBody(BaseModel):
+    request_token: str
+
+
+@app.post("/api/broker/exchange-token")
+def exchange_request_token(body: ExchangeTokenBody):
+    """
+    Exchange a Kite request_token for an access_token, persist it to .env,
+    and re-initialize the broker. Call this after the user logs into Kite
+    and pastes the request_token from the redirect URL.
+    """
+    global broker
+    import re as _re
+
+    raw = (body.request_token or "").strip()
+    if not raw:
+        return {"status": "error", "message": "request_token is required"}
+
+    # Accept either the bare token or the full redirect URL
+    m = _re.search(r"request_token=([A-Za-z0-9_-]+)", raw)
+    request_token = m.group(1) if m else raw
+
+    api_key = os.getenv("ZERODHA_API_KEY")
+    api_secret = os.getenv("ZERODHA_API_SECRET")
+    if not api_key or not api_secret:
+        return {"status": "error", "message": "ZERODHA_API_KEY / ZERODHA_API_SECRET missing in .env"}
+
+    try:
+        from kiteconnect import KiteConnect
+        kc = KiteConnect(api_key=api_key)
+        session = kc.generate_session(request_token, api_secret=api_secret)
+        access_token = session["access_token"]
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Exchange failed: {e}. Request tokens are single-use and expire in minutes — regenerate via the Kite login URL and retry immediately.",
+        }
+
+    # Persist token — two layers so it survives restarts in all environments:
+    # 1. os.environ: immediate (current process)
+    # 2. JSON store: survives server restarts on cloud (Render, Railway, etc.)
+    # 3. .env file: local dev convenience (best-effort, ignored if read-only)
+    os.environ["ZERODHA_ACCESS_TOKEN"] = access_token
+    _save_stored_token(access_token)  # cloud-safe persistence
+    try:
+        env_path = Path(__file__).parent / ".env"
+        lines = env_path.read_text().splitlines() if env_path.exists() else []
+        replaced = False
+        for i, line in enumerate(lines):
+            if line.startswith("ZERODHA_ACCESS_TOKEN="):
+                lines[i] = f"ZERODHA_ACCESS_TOKEN={access_token}"
+                replaced = True
+                break
+        if not replaced:
+            lines.append(f"ZERODHA_ACCESS_TOKEN={access_token}")
+        env_path.write_text("\n".join(lines) + "\n")
+    except Exception:
+        pass  # .env write fails on read-only filesystems (Render free tier) — JSON store covers it
+
+    # Re-initialize the broker with the new token
+    try:
+        broker = ZerodhaBroker()
+        balance = broker.get_balance() if broker.connected else {"status": "error"}
+    except Exception as e:
+        return {"status": "error", "message": f"Saved token but broker init failed: {e}"}
+
+    if balance.get("status") != "success":
+        return {
+            "status": "error",
+            "message": f"Token saved but still can't fetch balance: {balance.get('message', 'unknown')}",
+        }
+
+    return {
+        "status": "success",
+        "message": "✅ Access token saved. Broker is live.",
+        "connected": True,
+        "balance": balance.get("total_balance", 0),
+        "available_cash": balance.get("available_cash", 0),
+    }
+
+
+@app.get("/api/broker/balance")
+def get_broker_balance():
+    """Get account balance from Zerodha."""
+    global broker
+    if not broker or not broker.connected:
+        return {
+            "status": "error",
+            "message": "Broker not connected. Call /api/broker/test-connection first"
+        }
+
+    balance = broker.get_balance()
+    return balance
+
+
+@app.get("/api/broker/positions")
+def get_broker_positions():
+    """Get open positions from Zerodha."""
+    global broker
+    if not broker or not broker.connected:
+        return {
+            "status": "error",
+            "message": "Broker not connected"
+        }
+
+    positions = broker.get_positions()
+    return positions
+
+
+@app.post("/api/broker/toggle-real-trading")
+def toggle_real_trading(enable: bool):
+    """Toggle between test mode and real trading."""
+    global real_trading_enabled
+
+    if enable:
+        # Verify broker is connected
+        global broker
+        if not broker or not broker.connected:
+            broker = ZerodhaBroker()
+            if not broker.connected:
+                return {
+                    "status": "error",
+                    "message": "❌ Cannot enable real trading - broker not connected"
+                }
+
+        real_trading_enabled = True
+        save_real_config({"enabled": True})  # persist across backend restarts
+        return {
+            "status": "success",
+            "message": "🔴 REAL TRADING ENABLED - Placing actual trades",
+            "real_trading_enabled": True
+        }
+    else:
+        real_trading_enabled = False
+        save_real_config({"enabled": False})  # persist across backend restarts
+        return {
+            "status": "success",
+            "message": "🟢 TEST MODE ENABLED - No real trades",
+            "real_trading_enabled": False
+        }
+
+
+@app.get("/api/broker/status")
+def get_broker_status():
+    """Get current broker and trading status."""
+    global broker, real_trading_enabled
+
+    if broker and broker.connected:
+        balance = broker.get_balance()
+        # Session/token validity is proved only by margins() succeeding.
+        if balance.get("status") != "success":
+            return {
+                "status": "auth_error",
+                "connected": False,
+                "real_trading_enabled": False,
+                "balance": 0,
+                "total_balance": 0,
+                "can_trade": False,
+                "trading_reason": balance.get("message", "Broker auth failed"),
+                "auth_error": balance.get("message", "Broker auth failed"),
+                "mode": "OFFLINE",
+            }
+        can_trade_result = broker.can_trade()
+        return {
+            "status": "success",
+            "connected": True,
+            "real_trading_enabled": real_trading_enabled,
+            "balance": balance.get("available_cash", 0),
+            "total_balance": balance.get("total_balance", 0),
+            "can_trade": can_trade_result.get("can_trade", True),
+            "trading_reason": can_trade_result.get("reason", ""),
+            "mode": "🔴 LIVE" if real_trading_enabled else "🟢 TEST"
+        }
+    else:
+        return {
+            "status": "disconnected",
+            "connected": False,
+            "real_trading_enabled": False,
+            "balance": 0,
+            "can_trade": False,
+            "mode": "OFFLINE"
+        }
+
+
+@app.get("/api/broker/can-trade")
+def check_can_trade():
+    """Check if trading should continue based on balance limits."""
+    global broker
+
+    if not broker or not broker.connected:
+        return {
+            "can_trade": False,
+            "reason": "Broker not connected"
+        }
+
+    return broker.can_trade()
+
+
+@app.get("/api/settings")
+def get_settings():
+    """Get current trading settings."""
+    global trading_settings
+    return {"settings": trading_settings}
+
+
+@app.post("/api/settings")
+def update_settings(new_settings: dict):
+    """Update trading settings."""
+    global trading_settings
+
+    # Validate and update settings
+    for key, value in new_settings.items():
+        if key in trading_settings:
+            trading_settings[key] = value
+
+    logger.info(f"✅ Settings updated: {trading_settings}")
+    return {"status": "success", "settings": trading_settings}
+
+
+@app.get("/api/auto-trader/select-strategies")
+def select_strategies(performance_data: dict = None):
+    """
+    AI selects best strategies based on performance for real trading.
+    Uses: win_rate > STRATEGY_WIN_RATE_THRESHOLD
+          trades >= MIN_TRADES_FOR_SELECTION
+    """
+    import os
+
+    threshold = int(os.getenv("STRATEGY_WIN_RATE_THRESHOLD", "60"))
+    min_trades = int(os.getenv("MIN_TRADES_FOR_SELECTION", "10"))
+
+    selected = []
+    disabled = []
+
+    if not performance_data:
+        return {
+            "message": "No performance data provided",
+            "selected_strategies": [],
+            "disabled_strategies": [],
+            "threshold": threshold,
+            "min_trades": min_trades
+        }
+
+    for strategy_id, perf in performance_data.items():
+        trades = perf.get("trades", 0)
+        win_rate = perf.get("win_rate", 0)
+
+        if trades >= min_trades and win_rate >= threshold:
+            selected.append({
+                "strategy": strategy_id,
+                "win_rate": win_rate,
+                "trades": trades,
+                "pnl": perf.get("pnl", 0),
+                "reason": f"✅ {win_rate}% win rate with {trades} trades"
+            })
+        else:
+            disabled.append({
+                "strategy": strategy_id,
+                "win_rate": win_rate,
+                "trades": trades,
+                "reason": f"❌ Need {threshold}% win rate (has {win_rate}%) or {min_trades} trades (has {trades})"
+            })
+
+    return {
+        "selected_strategies": selected,
+        "disabled_strategies": disabled,
+        "total_selected": len(selected),
+        "threshold": threshold,
+        "min_trades": min_trades,
+        "recommendation": f"Use {len(selected)} strategy/strategies in real trading"
+    }
 
 
 # ── WebSocket ──────────────────────────────────────────────────────────
