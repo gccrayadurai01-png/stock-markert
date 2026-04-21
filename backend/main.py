@@ -414,6 +414,24 @@ async def _broker_reconnect_loop():
         await asyncio.sleep(60)
 
 
+async def _keep_alive_loop():
+    """
+    Ping our own /health endpoint every 10 minutes.
+    Prevents Render free-tier from sleeping the dyno during market hours.
+    """
+    import httpx
+    await asyncio.sleep(60)  # startup grace
+    while True:
+        try:
+            port = os.getenv("PORT", "8000")
+            async with httpx.AsyncClient(timeout=10) as client:
+                await client.get(f"http://localhost:{port}/health")
+            logger.debug("💓 Keep-alive ping sent")
+        except Exception:
+            pass
+        await asyncio.sleep(600)  # every 10 minutes
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global auto_trader
@@ -445,6 +463,9 @@ async def lifespan(app: FastAPI):
     # Keep broker alive — reconnects automatically if dropped
     asyncio.create_task(_broker_reconnect_loop())
 
+    # Keep Render free-tier awake (self-ping every 10 min)
+    asyncio.create_task(_keep_alive_loop())
+
     # The scheduler handles starting/stopping — it checks immediately on first run.
     # Do NOT start auto_trader here to avoid the double-start race condition.
     auto_cfg = load_auto_config()
@@ -468,6 +489,18 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 @app.get("/")
 def root():
     return {"status": "running", "name": "AI Trading Command Center v2"}
+
+
+@app.get("/health")
+def health():
+    """Health check — used by Render and keep-alive loop to prevent free-tier sleep."""
+    return {
+        "status": "ok",
+        "broker_connected": bool(broker and broker.connected),
+        "real_trading": real_trading_enabled,
+        "auto_trader_running": bool(auto_trader and auto_trader.running),
+        "timestamp": datetime.now().isoformat(),
+    }
 
 
 @app.get("/api/dashboard")
