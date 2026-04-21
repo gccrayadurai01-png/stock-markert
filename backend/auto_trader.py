@@ -219,26 +219,40 @@ class AutoTrader:
                         # Score >= 70 → AUTO-APPROVE, no AI needed (strategy already validated)
                         # Score 55-69 → AI as soft check (warning only, never blocks)
                         # Score < 55  → No trade (below threshold)
+                        # ── AI confirmation (REAL trade is gated by this) ───────
+                        # Paper stays permissive; real trades require AI says YES
+                        # (unless AI is unreachable — then fall back to strategy alone).
                         ai_reasoning = "Auto-approved — high confidence score"
+                        ai_confirmed = True  # default yes; only AI 'no' flips this
                         if best_score >= 70:
-                            # High confidence: skip AI entirely, trust the strategy score
-                            logger.info(f"✅ Auto-approved {stock['symbol']} score={best_score}/100 (≥70 threshold, AI skipped)")
+                            # High confidence: still ask AI for real-trade gating
+                            if self.config.get("use_ai_confirmation", True):
+                                try:
+                                    ai_result = await self._get_ai_confirmation(stock, entry_analysis)
+                                    ai_reasoning = ai_result.get("reasoning", "AI check done")
+                                    ai_confirmed = bool(ai_result.get("confirmed", True))
+                                    if not ai_confirmed:
+                                        logger.info(f"⚠️ AI rejected {stock['symbol']} (real blocked, paper proceeds): {ai_reasoning}")
+                                except Exception as e:
+                                    logger.warning(f"AI confirmation error for {stock['symbol']} — real trade will proceed on strategy: {e}")
+                            else:
+                                logger.info(f"✅ Auto-approved {stock['symbol']} score={best_score}/100 (AI confirmation disabled)")
                         elif self.config.get("use_ai_confirmation", True):
-                            # Borderline score: ask AI but treat as advisory only (never blocks)
+                            # Borderline score: ask AI; advisory for paper, required for real
                             try:
                                 ai_result = await self._get_ai_confirmation(stock, entry_analysis)
                                 ai_reasoning = ai_result.get("reasoning", "AI advisory check done")
-                                if not ai_result.get("confirmed", True):
-                                    # Log the AI concern but DO NOT block — advisory only
-                                    ai_reasoning = f"⚠️ AI note: {ai_result.get('reasoning', '')} (trade proceeds on score)"
+                                ai_confirmed = bool(ai_result.get("confirmed", True))
+                                if not ai_confirmed:
+                                    ai_reasoning = f"⚠️ AI note: {ai_result.get('reasoning', '')} (paper proceeds, real blocked)"
                                     logger.info(f"⚠️ AI advisory for {stock['symbol']}: {ai_reasoning}")
                             except Exception as e:
                                 logger.warning(f"AI confirmation error for {stock['symbol']}: {e}")
 
-                        # EXECUTE REAL TRADE (independent) — runs regardless of paper,
-                        # gated by real's own active_strategies / min_confluence / sizing.
+                        # EXECUTE REAL TRADE — gated by strategy fire + AI confirm.
+                        # NO paper win-rate dependency.
                         try:
-                            self._real_entry(stock, entry_analysis, real_open_symbols)
+                            self._real_entry(stock, entry_analysis, real_open_symbols, ai_confirmed=ai_confirmed, ai_reasoning=ai_reasoning)
                         except Exception as _e:
                             logger.error(f"🔴💥 real entry error: {_e}", exc_info=True)
 
@@ -1427,16 +1441,19 @@ Respond ONLY with JSON: {{"confirmed": true, "reasoning": "one sentence why"}}""
             else:
                 logger.error(f"🔴❌ REAL EXIT FAILED: {ts} — {order.get('message')}")
 
-    def _real_entry(self, stock: dict, analysis: dict, already_open: set):
+    def _real_entry(self, stock: dict, analysis: dict, already_open: set,
+                    ai_confirmed: bool = True, ai_reasoning: str = ""):
         """
-        Systematic REAL entry. Independent of paper. Fires iff:
-          - broker connected
-          - real_trading_enabled (enforced in broker_provider)
+        Systematic REAL entry. Independent of paper history.
+        Fires iff:
+          - broker connected + real_trading_enabled
           - at least one fired strategy is in real's active_strategies
           - confluence ≥ real's min_confluence
-          - not already holding this symbol on the real account
-          - allocated real capital supports at least 1 share after risk/cap sizing
-          - trade limits not exceeded (max_open_positions, max_trades_per_day)
+          - AI confirmation says YES (if AI reachable; else pass on strategy alone)
+          - not already holding this symbol
+          - sizing produces ≥ 1 share
+          - trade limits not exceeded
+        Paper win-rate is NO LONGER a gate — strategy fire + AI confirm is enough.
         """
         broker = self._real_get_broker()
         if not broker:
@@ -1462,41 +1479,14 @@ Respond ONLY with JSON: {{"confirmed": true, "reasoning": "one sentence why"}}""
         if float(analysis.get("confluence", 0)) < min_conf:
             return
 
-        # ── Min paper win-rate gate ────────────────────────────────────────
-        # Only trade strategies that have proven ≥ min_paper_win_rate in paper.
-        min_wr = float(cfg.get("min_paper_win_rate", 0) or 0)
-        min_trades = int(cfg.get("min_paper_trades", 0) or 0)
-        # High-confidence bypass: if live confluence is very strong, trust the
-        # signal even if paper history is thin. Lets Momentum (A) and SMC (E)
-        # trade before they've racked up enough paper wins.
-        hc_bypass = float(cfg.get("high_confidence_bypass_score", 80) or 0)
-        live_score = float(analysis.get("confluence", 0) or 0)
-        if hc_bypass > 0 and live_score >= hc_bypass:
+        # ── AI confirmation gate ──────────────────────────────────────────
+        # No more paper win-rate dependency. Real trades require AI to not
+        # explicitly reject (unless AI is unreachable → fall back to strategy).
+        if not ai_confirmed:
             logger.info(
-                f"🔴✨ real: high-confidence bypass (score {live_score:.0f} ≥ {hc_bypass:.0f}) "
-                f"— skipping paper win-rate gate for {sorted(matched)}"
+                f"🔴🧠⛔ real: AI rejected {stock.get('symbol','?')} — "
+                f"skipping real trade. Reason: {ai_reasoning}"
             )
-        elif min_wr > 0 or min_trades > 0:
-            try:
-                from auto_store import get_strategy_performance
-                perf = get_strategy_performance() or {}
-                for sid in list(matched):
-                    s_perf = perf.get(sid, {})
-                    total = int(s_perf.get("total_trades", 0))
-                    wr    = float(s_perf.get("win_rate", 0))
-                    if total < min_trades:
-                        logger.info(
-                            f"🔴⏸ real: strategy {sid} only {total}/{min_trades} paper trades, skipping"
-                        )
-                        matched.discard(sid)
-                    elif wr < min_wr:
-                        logger.info(
-                            f"🔴⏸ real: strategy {sid} win-rate {wr:.1f}% < {min_wr:.1f}% threshold, skipping"
-                        )
-                        matched.discard(sid)
-            except Exception as _e:
-                logger.warning(f"⚠️ Could not check paper win-rate: {_e}")
-        if not matched:
             return
 
         # ── Max trades per day gate ────────────────────────────────────────
