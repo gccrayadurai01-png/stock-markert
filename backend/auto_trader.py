@@ -1443,6 +1443,14 @@ Respond ONLY with JSON: {{"confirmed": true, "reasoning": "one sentence why"}}""
             return
 
         cfg = load_real_config()
+
+        # ── News-trade gate ────────────────────────────────────────────────
+        # If allow_news_trades=False, block any signal that was news-driven.
+        if not cfg.get("allow_news_trades", True):
+            if analysis.get("news_driven") or analysis.get("source") == "news":
+                logger.info(f"🔴⛔ real: news trades disabled, skipping {stock.get('symbol','?')}")
+                return
+
         active_map = cfg.get("active_strategies", {}) or {}
         active_real = {k for k, v in active_map.items() if v}
         fired = set(analysis.get("strategies_confirmed", []))
@@ -1450,9 +1458,54 @@ Respond ONLY with JSON: {{"confirmed": true, "reasoning": "one sentence why"}}""
         if not matched:
             return
 
-        min_conf = float(cfg.get("min_confluence", 60) or 60)
+        min_conf = float(cfg.get("min_confluence", 65) or 65)
         if float(analysis.get("confluence", 0)) < min_conf:
             return
+
+        # ── Min paper win-rate gate ────────────────────────────────────────
+        # Only trade strategies that have proven ≥ min_paper_win_rate in paper.
+        min_wr = float(cfg.get("min_paper_win_rate", 0) or 0)
+        min_trades = int(cfg.get("min_paper_trades", 0) or 0)
+        if min_wr > 0 or min_trades > 0:
+            try:
+                from auto_store import get_strategy_performance
+                perf = get_strategy_performance() or {}
+                for sid in list(matched):
+                    s_perf = perf.get(sid, {})
+                    total = int(s_perf.get("total_trades", 0))
+                    wr    = float(s_perf.get("win_rate", 0))
+                    if total < min_trades:
+                        logger.info(
+                            f"🔴⏸ real: strategy {sid} only {total}/{min_trades} paper trades, skipping"
+                        )
+                        matched.discard(sid)
+                    elif wr < min_wr:
+                        logger.info(
+                            f"🔴⏸ real: strategy {sid} win-rate {wr:.1f}% < {min_wr:.1f}% threshold, skipping"
+                        )
+                        matched.discard(sid)
+            except Exception as _e:
+                logger.warning(f"⚠️ Could not check paper win-rate: {_e}")
+        if not matched:
+            return
+
+        # ── Max trades per day gate ────────────────────────────────────────
+        max_daily = int(cfg.get("max_trades_per_day", 4) or 4)
+        today = datetime.now().strftime("%Y-%m-%d")
+        try:
+            from auto_store import get_trade_journal
+            journal = get_trade_journal() or []
+            real_today = sum(
+                1 for t in journal
+                if t.get("action") == "ENTER"
+                and t.get("timestamp", "").startswith(today)
+                and t.get("real_trade")
+            )
+            if real_today >= max_daily:
+                logger.info(f"🔴⏸ real: max_trades_per_day ({max_daily}) reached for today")
+                return
+        except Exception:
+            pass
 
         tradingsymbol = str(stock["symbol"]).replace(".NS", "").replace(".BO", "").upper()
         if tradingsymbol in already_open:
@@ -1495,6 +1548,22 @@ Respond ONLY with JSON: {{"confirmed": true, "reasoning": "one sentence why"}}""
                 f"order_id={order.get('order_id')} · strategies={sorted(matched)} · "
                 f"score={analysis.get('confluence')}"
             )
+            # Log to trade journal so max_trades_per_day counter works
+            try:
+                log_trade_decision({
+                    "action": "ENTER",
+                    "symbol": tradingsymbol,
+                    "real_trade": True,
+                    "entry_price": round(price, 2),
+                    "shares": shares,
+                    "order_id": order.get("order_id"),
+                    "strategy_key": "+".join(sorted(matched)),
+                    "confluence_score": analysis.get("confluence"),
+                    "reasoning": analysis.get("reasons", []),
+                    "timestamp": datetime.now().isoformat(),
+                })
+            except Exception as _je:
+                logger.warning(f"⚠️ Could not log real trade to journal: {_je}")
         else:
             logger.error(f"🔴❌ REAL ENTRY FAILED: {tradingsymbol} — {order.get('message')}")
 
