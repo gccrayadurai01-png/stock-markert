@@ -1466,7 +1466,17 @@ Respond ONLY with JSON: {{"confirmed": true, "reasoning": "one sentence why"}}""
         # Only trade strategies that have proven ≥ min_paper_win_rate in paper.
         min_wr = float(cfg.get("min_paper_win_rate", 0) or 0)
         min_trades = int(cfg.get("min_paper_trades", 0) or 0)
-        if min_wr > 0 or min_trades > 0:
+        # High-confidence bypass: if live confluence is very strong, trust the
+        # signal even if paper history is thin. Lets Momentum (A) and SMC (E)
+        # trade before they've racked up enough paper wins.
+        hc_bypass = float(cfg.get("high_confidence_bypass_score", 80) or 0)
+        live_score = float(analysis.get("confluence", 0) or 0)
+        if hc_bypass > 0 and live_score >= hc_bypass:
+            logger.info(
+                f"🔴✨ real: high-confidence bypass (score {live_score:.0f} ≥ {hc_bypass:.0f}) "
+                f"— skipping paper win-rate gate for {sorted(matched)}"
+            )
+        elif min_wr > 0 or min_trades > 0:
             try:
                 from auto_store import get_strategy_performance
                 perf = get_strategy_performance() or {}
@@ -1527,8 +1537,14 @@ Respond ONLY with JSON: {{"confirmed": true, "reasoning": "one sentence why"}}""
         risk_pct     = float(cfg.get("risk_per_trade_pct", 1) or 1) / 100
         max_pos_pct  = float(cfg.get("max_position_size_pct", 10) or 10) / 100
         risk_per_share = max(price - stop_loss, price * 0.01)
+        # MIS margin leverage — broker gives up to 5x on intraday. We leverage
+        # only the POSITION CAP, never the RISK budget, so max loss per trade
+        # stays capped at risk_pct of *actual* capital (not leveraged capital).
+        use_lev = bool(cfg.get("use_margin_leverage", True))
+        leverage = float(cfg.get("margin_multiplier", 5) or 1) if use_lev else 1.0
+        leverage = max(1.0, leverage)
         shares_risk = int((real_capital * risk_pct) // risk_per_share) if risk_per_share > 0 else 0
-        shares_cap  = int((real_capital * max_pos_pct) // price) if price > 0 else 0
+        shares_cap  = int((real_capital * max_pos_pct * leverage) // price) if price > 0 else 0
         shares = max(0, min(shares_risk, shares_cap))
         if shares <= 0:
             logger.warning(
@@ -1536,6 +1552,11 @@ Respond ONLY with JSON: {{"confirmed": true, "reasoning": "one sentence why"}}""
                 f"insufficient (risk ₹{risk_per_share:.2f}/share @ ₹{price:.2f})"
             )
             return
+        logger.info(
+            f"🔴📐 sizing {tradingsymbol}: cap=₹{real_capital:.0f} lev={leverage:.1f}x "
+            f"risk={shares_risk} cap={shares_cap} → {shares} shares @ ₹{price:.2f} "
+            f"(notional ₹{shares*price:.0f}, max-loss ₹{shares*risk_per_share:.0f})"
+        )
 
         order = broker.place_order(
             symbol=tradingsymbol, quantity=shares, price=round(price, 2),
