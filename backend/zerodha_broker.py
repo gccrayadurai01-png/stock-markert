@@ -98,6 +98,20 @@ class ZerodhaBroker:
             return {"status": "error", "message": "Broker not connected"}
 
         try:
+            # Zerodha API does not allow MARKET orders without market protection.
+            # If caller passes MARKET + price=0, convert to LIMIT at live price +0.3%.
+            if order_type == "MARKET" or price == 0:
+                q = self.get_quote(symbol)
+                live = float(q.get("price", 0))
+                if live <= 0:
+                    return {"status": "error", "message": f"Could not fetch live price for {symbol}"}
+                if transaction_type == "BUY":
+                    price = round(live * 1.003, 1)   # 0.3% above — ensures fill
+                else:
+                    price = round(live * 0.997, 1)   # 0.3% below for SELL
+                order_type = "LIMIT"
+                logger.info(f"📌 Converted MARKET→LIMIT for {symbol}: ₹{price} (live ₹{live})")
+
             order_id = self.kite.place_order(
                 variety="regular",
                 exchange="NSE",
@@ -198,34 +212,33 @@ class ZerodhaBroker:
                 is_auth    = "access_token" in err_str.lower() or "api_key" in err_str.lower() or "invalid" in err_str.lower()
 
                 if is_auth:
-                    # Auth error is definitive — no retry, mark disconnected
+                    # Auth error is definitive — token expired, mark disconnected
                     logger.error(f"❌ Balance fetch: auth error — {e}")
                     self.connected = False
-                    return {"status": "error", "message": err_str}
+                    self._auth_error = err_str
+                    return {"status": "error", "message": err_str, "auth_error": True}
 
                 if is_timeout and attempt == 0:
                     logger.warning(f"⏳ Balance fetch timed out, retrying once…")
                     continue  # retry
 
-                # Non-auth, non-timeout failure (or 2nd attempt still fails)
+                # Network / transient failure — NEVER mark disconnected for this
+                # The token is still valid; just the network is slow.
                 self._consecutive_failures += 1
                 logger.warning(
-                    f"⚠️ Balance fetch failed ({self._consecutive_failures}/{self._MAX_FAILURES}): {e}"
+                    f"⚠️ Balance fetch failed ({self._consecutive_failures}) [network, not auth]: {e}"
                 )
-                if self._consecutive_failures >= self._MAX_FAILURES:
-                    logger.error("❌ 3 consecutive balance failures — marking broker disconnected")
-                    self.connected = False
-                    return {"status": "error", "message": err_str}
 
                 # Return last-known-good so UI stays green on transient hiccup
                 if self._last_balance:
                     cached = dict(self._last_balance)
                     cached["cached"] = True
-                    cached["warning"] = f"Network hiccup — showing cached balance ({err_str})"
-                    logger.warning(f"⚠️ Returning cached balance due to transient error")
+                    cached["warning"] = f"Network hiccup — showing cached balance"
+                    logger.warning(f"⚠️ Returning cached balance, broker still connected")
                     return cached
 
-                return {"status": "error", "message": err_str}
+                # No cached balance yet — return error but keep connected=True
+                return {"status": "error", "message": err_str, "network_error": True}
 
     def get_positions(self) -> Dict:
         """Get open positions (intraday)."""

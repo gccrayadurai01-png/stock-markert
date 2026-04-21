@@ -395,21 +395,20 @@ async def _broker_reconnect_loop():
     await asyncio.sleep(30)  # brief startup grace period
     while True:
         try:
-            if real_trading_enabled and (not broker or not broker.connected):
-                # Check if it's a real auth failure or just a timeout/network blip
-                if broker and not broker.connected and getattr(broker, "_consecutive_failures", 0) < 3:
-                    # Connected flag flipped by timeout — don't reconnect, just wait
-                    logger.warning("⚠️ Broker flagged disconnected but may be a network blip — waiting")
+            is_auth_failure = broker and getattr(broker, "_auth_error", None)
+            is_missing = not broker
+            # Only reconnect for: no broker object OR genuine auth token failure
+            # Do NOT reconnect for network timeouts — broker.connected stays True for those
+            if real_trading_enabled and (is_missing or is_auth_failure):
+                logger.info("🔄 Broker reconnect: auth failure or missing — retrying with stored credentials…")
+                connected = await asyncio.get_event_loop().run_in_executor(None, _try_connect_broker)
+                if not connected:
+                    logger.warning(
+                        "⚠️  Broker reconnect failed. Token likely expired — go to "
+                        "Dashboard → Broker → Login with Zerodha to refresh."
+                    )
                 else:
-                    logger.info("🔄 Broker reconnect: retrying with stored credentials…")
-                    connected = await asyncio.get_event_loop().run_in_executor(None, _try_connect_broker)
-                    if not connected:
-                        logger.warning(
-                            "⚠️  Broker reconnect failed. If token expired, go to Dashboard → "
-                            "Broker → Login with Zerodha to get a fresh access token."
-                        )
-                    else:
-                        logger.info("✅ Broker reconnected successfully")
+                    logger.info("✅ Broker reconnected successfully")
         except Exception as e:
             logger.error(f"❌ Broker reconnect loop error: {e}")
         await asyncio.sleep(60)
@@ -1836,8 +1835,9 @@ def get_broker_status():
 
     if broker and broker.connected:
         balance = broker.get_balance()
-        # Session/token validity is proved only by margins() succeeding.
-        if balance.get("status") != "success":
+        # Only go OFFLINE for genuine auth errors (expired token).
+        # Network timeouts return cached balance with status="success" — stay connected.
+        if balance.get("auth_error"):
             return {
                 "status": "auth_error",
                 "connected": False,
@@ -1845,8 +1845,8 @@ def get_broker_status():
                 "balance": 0,
                 "total_balance": 0,
                 "can_trade": False,
-                "trading_reason": balance.get("message", "Broker auth failed"),
-                "auth_error": balance.get("message", "Broker auth failed"),
+                "trading_reason": "Token expired — login via Broker tab to refresh",
+                "auth_error": balance.get("message", "Token expired"),
                 "mode": "OFFLINE",
             }
         can_trade_result = broker.can_trade()
@@ -1858,6 +1858,7 @@ def get_broker_status():
             "total_balance": balance.get("total_balance", 0),
             "can_trade": can_trade_result.get("can_trade", True),
             "trading_reason": can_trade_result.get("reason", ""),
+            "cached_balance": balance.get("cached", False),
             "mode": "🔴 LIVE" if real_trading_enabled else "🟢 TEST"
         }
     else:
