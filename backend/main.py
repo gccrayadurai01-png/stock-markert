@@ -396,13 +396,20 @@ async def _broker_reconnect_loop():
     while True:
         try:
             if real_trading_enabled and (not broker or not broker.connected):
-                logger.info("🔄 Broker reconnect loop: real trading enabled but broker offline — retrying…")
-                connected = await asyncio.get_event_loop().run_in_executor(None, _try_connect_broker)
-                if not connected:
-                    logger.warning(
-                        "⚠️  Broker reconnect failed. If token expired, go to Dashboard → "
-                        "Broker → Login with Zerodha to get a fresh access token."
-                    )
+                # Check if it's a real auth failure or just a timeout/network blip
+                if broker and not broker.connected and getattr(broker, "_consecutive_failures", 0) < 3:
+                    # Connected flag flipped by timeout — don't reconnect, just wait
+                    logger.warning("⚠️ Broker flagged disconnected but may be a network blip — waiting")
+                else:
+                    logger.info("🔄 Broker reconnect: retrying with stored credentials…")
+                    connected = await asyncio.get_event_loop().run_in_executor(None, _try_connect_broker)
+                    if not connected:
+                        logger.warning(
+                            "⚠️  Broker reconnect failed. If token expired, go to Dashboard → "
+                            "Broker → Login with Zerodha to get a fresh access token."
+                        )
+                    else:
+                        logger.info("✅ Broker reconnected successfully")
         except Exception as e:
             logger.error(f"❌ Broker reconnect loop error: {e}")
         await asyncio.sleep(60)

@@ -43,17 +43,34 @@ class ZerodhaBroker:
             if not all([self.api_key, self.api_secret, self.access_token]):
                 raise ValueError("Missing Zerodha credentials in .env")
 
+            # Increase timeout to 30s — default 7s causes false disconnects on slow networks
             self.kite = KiteConnect(api_key=self.api_key)
             self.kite.set_access_token(self.access_token)
+            # Patch session timeout if kiteconnect exposes it
+            try:
+                self.kite.reqsession.timeout = 30
+            except Exception:
+                pass
+
+            # Track last known good balance so we don't flip "disconnected" on a single timeout
+            self._last_balance: dict = {}
+            self._consecutive_failures: int = 0
+            self._MAX_FAILURES = 3  # only mark disconnected after 3 consecutive failures
 
             logger.info("✅ Zerodha Kite API connected")
             self.connected = True
         except ImportError:
             logger.warning("⚠️ kiteconnect not installed. Run: pip install kiteconnect")
             self.connected = False
+            self._last_balance = {}
+            self._consecutive_failures = 0
+            self._MAX_FAILURES = 3
         except Exception as e:
             logger.error(f"❌ Zerodha connection failed: {e}")
             self.connected = False
+            self._last_balance = {}
+            self._consecutive_failures = 0
+            self._MAX_FAILURES = 3
 
     def place_order(
         self,
@@ -143,33 +160,72 @@ class ZerodhaBroker:
             return {"status": "error", "message": str(e)}
 
     def get_balance(self) -> Dict:
-        """Get account balance and margin info."""
+        """
+        Get account balance and margin info.
+        Retries once on timeout, returns last-known-good on transient failure
+        so the UI doesn't flash 'disconnected' on a slow network call.
+        Only marks truly disconnected after 3 consecutive failures.
+        """
         if not self.connected:
             return {"status": "error", "message": "Broker not connected"}
 
-        try:
-            margins = self.kite.margins()
-            equity = margins.get("equity", {}) or {}
-            # KiteConnect returns `available` and `utilised` as NESTED DICTS, not numbers.
-            available = equity.get("available", {}) or {}
-            utilised = equity.get("utilised", {}) or {}
+        for attempt in range(2):  # 1 retry on timeout
+            try:
+                margins = self.kite.margins()
+                equity = margins.get("equity", {}) or {}
+                available = equity.get("available", {}) or {}
+                utilised  = equity.get("utilised", {}) or {}
 
-            # Prefer live_balance (real-time cash available for trading); fall back to cash.
-            cash_avail = available.get("live_balance")
-            if cash_avail is None:
-                cash_avail = available.get("cash", 0)
+                cash_avail = available.get("live_balance")
+                if cash_avail is None:
+                    cash_avail = available.get("cash", 0)
 
-            return {
-                "status": "success",
-                "available_cash": round(float(cash_avail or 0), 2),
-                "used_margin": round(float(utilised.get("debits", 0) or 0), 2),
-                "total_balance": round(float(equity.get("net", 0) or 0), 2),
-                "multiplier": equity.get("multiplier", 1),
-                "timestamp": datetime.now().isoformat(),
-            }
-        except Exception as e:
-            logger.error(f"❌ Balance fetch failed: {e}")
-            return {"status": "error", "message": str(e)}
+                result = {
+                    "status": "success",
+                    "available_cash": round(float(cash_avail or 0), 2),
+                    "used_margin": round(float(utilised.get("debits", 0) or 0), 2),
+                    "total_balance": round(float(equity.get("net", 0) or 0), 2),
+                    "multiplier": equity.get("multiplier", 1),
+                    "timestamp": datetime.now().isoformat(),
+                }
+                self._last_balance = result          # cache last good value
+                self._consecutive_failures = 0       # reset failure counter
+                return result
+
+            except Exception as e:
+                err_str = str(e)
+                is_timeout = "timed out" in err_str.lower() or "timeout" in err_str.lower()
+                is_auth    = "access_token" in err_str.lower() or "api_key" in err_str.lower() or "invalid" in err_str.lower()
+
+                if is_auth:
+                    # Auth error is definitive — no retry, mark disconnected
+                    logger.error(f"❌ Balance fetch: auth error — {e}")
+                    self.connected = False
+                    return {"status": "error", "message": err_str}
+
+                if is_timeout and attempt == 0:
+                    logger.warning(f"⏳ Balance fetch timed out, retrying once…")
+                    continue  # retry
+
+                # Non-auth, non-timeout failure (or 2nd attempt still fails)
+                self._consecutive_failures += 1
+                logger.warning(
+                    f"⚠️ Balance fetch failed ({self._consecutive_failures}/{self._MAX_FAILURES}): {e}"
+                )
+                if self._consecutive_failures >= self._MAX_FAILURES:
+                    logger.error("❌ 3 consecutive balance failures — marking broker disconnected")
+                    self.connected = False
+                    return {"status": "error", "message": err_str}
+
+                # Return last-known-good so UI stays green on transient hiccup
+                if self._last_balance:
+                    cached = dict(self._last_balance)
+                    cached["cached"] = True
+                    cached["warning"] = f"Network hiccup — showing cached balance ({err_str})"
+                    logger.warning(f"⚠️ Returning cached balance due to transient error")
+                    return cached
+
+                return {"status": "error", "message": err_str}
 
     def get_positions(self) -> Dict:
         """Get open positions (intraday)."""
